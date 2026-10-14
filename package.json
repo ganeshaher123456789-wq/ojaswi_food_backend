@@ -1,0 +1,37 @@
+{
+  "name": "ojaswi-backend",
+  "version": "1.0.0",
+  "description": "Ojaswi Premium Authentic Indian Spices - Full-Stack Production E-Commerce API & Server",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "db:init": "node database/init.js",
+    "db:seed": "node database/seed.js",
+    "test": "node tests/test-runner.js",
+    "test:otp": "node tests/test-phone-otp.js"
+  },
+  "keywords": [
+    "ojaswi",
+    "spices",
+    "ecommerce",
+    "api",
+    "backend"
+  ],
+  "author": "Ojaswi Foods",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.2",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^9.11.2",
+    "multer": "^1.4.5-lts.1",
+    "nodemailer": "^6.10.0",
+    "pg": "^8.13.3",
+    "razorpay": "^2.9.5"
+  }
+}
