@@ -1,10 +1,12 @@
 import express from "express";
 import { db } from "../config/db.js";
+import { User, Order, Product, Payment, Address } from "../models/index.js";
 import { generateOrderId, validateIndianPhone, validateIndianPincode, validateEmail } from "../utils/helpers.js";
 import { paymentService } from "../services/paymentService.js";
 import { notificationService } from "../services/notificationService.js";
 import { OJASWI_CONSTANTS } from "../config/constants.js";
 import { requireAuth } from "../middleware/auth.js";
+import { generateReceiptData, renderReceiptHtml } from "../utils/receiptGenerator.js";
 
 const router = express.Router();
 
@@ -132,6 +134,27 @@ router.post("/", async (req, res, next) => {
     const deliveryCharge = OJASWI_CONSTANTS.DEFAULT_DELIVERY_CHARGE;
     const totalAmount = subtotal + deliveryCharge;
 
+    // Idempotency check: prevent duplicate orders if client retries within 45 seconds
+    try {
+      const recentDuplicate = await Order.findOne({
+        customer_phone: cleanPhone,
+        total_amount: totalAmount,
+        created_at: { $gte: new Date(Date.now() - 45 * 1000) }
+      }).lean();
+
+      if (recentDuplicate) {
+        console.log(`[ORDER RETRY] Returning existing order ${recentDuplicate.id} for phone ${cleanPhone}`);
+        return res.json({
+          success: true,
+          message: "Order placed successfully!",
+          orderId: recentDuplicate.id,
+          order: recentDuplicate,
+          items: recentDuplicate.items && recentDuplicate.items.length > 0 ? recentDuplicate.items : orderItems,
+          requiresOnlinePayment: recentDuplicate.payment_method !== OJASWI_CONSTANTS.PAYMENT_METHODS.COD && recentDuplicate.payment_status !== "Paid"
+        });
+      }
+    } catch (_) {}
+
     const orderId = generateOrderId();
     const isCOD = payment_method === OJASWI_CONSTANTS.PAYMENT_METHODS.COD;
     const paymentStatus = isCOD
@@ -139,10 +162,25 @@ router.post("/", async (req, res, next) => {
       : "Payment Pending";
     const orderStatus = isCOD ? "Confirmed" : "Pending";
 
-    const userId = req.user ? req.user.id : null;
+    // Associate order with verified authenticated customer ID, or auto-match registered customer by phone/email
+    let userId = req.user ? req.user.id : null;
+    if (!userId) {
+      try {
+        const matched = await User.findOne({
+          $or: [
+            ...(cleanPhone ? [{ phone: cleanPhone }] : []),
+            ...(customer_email ? [{ email: customer_email.trim().toLowerCase() }] : [])
+          ]
+        }).lean();
+        if (matched) {
+          userId = matched.id;
+        }
+      } catch (_) {}
+    }
+
     const addressJson = JSON.stringify(cleanAddress);
 
-    // 4. Save Order
+    // 4. Save Order in SQL Database
     await db.run(
       `INSERT INTO orders (id, user_id, customer_name, customer_phone, customer_email, subtotal, delivery_charge, discount_amount, total_amount, payment_method, payment_status, order_status, delivery_address_json, notes)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11, $12, $13)`,
@@ -189,6 +227,84 @@ router.post("/", async (req, res, next) => {
       }
     }
 
+    // 5b. Persist Order and Items directly to MongoDB Atlas
+    try {
+      await Order.findOneAndUpdate(
+        { id: orderId },
+        {
+          id: orderId,
+          user_id: userId,
+          customer_name: customer_name.trim(),
+          customer_phone: cleanPhone,
+          customer_email: customer_email ? customer_email.trim().toLowerCase() : null,
+          subtotal,
+          delivery_charge: deliveryCharge,
+          discount_amount: 0,
+          total_amount: totalAmount,
+          payment_method: isCOD ? OJASWI_CONSTANTS.PAYMENT_METHODS.COD : OJASWI_CONSTANTS.PAYMENT_METHODS.ONLINE,
+          payment_status: paymentStatus,
+          order_status: orderStatus,
+          delivery_address: cleanAddress,
+          delivery_address_json: addressJson,
+          items: orderItems,
+          notes: notes || null,
+          created_at: new Date(),
+          updated_at: new Date()
+        },
+        { upsert: true, returnDocument: 'after' }
+      );
+
+      // Update customer stats and address in MongoDB Atlas
+      if (userId) {
+        try {
+          await User.findOneAndUpdate(
+            { id: userId },
+            {
+              $inc: { total_orders: 1, total_spent: totalAmount },
+              $set: {
+                last_order_id: orderId,
+                last_order_date: new Date(),
+                delivery_address: cleanAddress,
+                city: cleanAddress.city || "Malegaon",
+                state: cleanAddress.state || "Maharashtra",
+                pincode: cleanAddress.pincode || "423203",
+                updated_at: new Date()
+              }
+            }
+          );
+        } catch (uErr) {
+          console.warn("[MongoDB] Customer order stats sync notice:", uErr.message);
+        }
+
+        // Record address in Address collection
+        try {
+          await Address.create({
+            user_id: userId,
+            recipient_name: customer_name.trim(),
+            recipient_phone: cleanPhone,
+            flat_house: cleanAddress.flat_house,
+            area_street: cleanAddress.area_street,
+            city: cleanAddress.city || "Malegaon",
+            state: cleanAddress.state || "Maharashtra",
+            pincode: cleanAddress.pincode || "423203",
+            is_default: true,
+            created_at: new Date()
+          });
+        } catch (_) {}
+      }
+
+      if (isCOD) {
+        for (const item of orderItems) {
+          await Product.findOneAndUpdate(
+            { id: item.product_id },
+            { $inc: { stock: -item.quantity } }
+          );
+        }
+      }
+    } catch (mErr) {
+      console.warn("[MongoDB] Order Atlas sync notice:", mErr.message);
+    }
+
     const createdOrder = await db.get("SELECT * FROM orders WHERE id = $1", [orderId]);
     createdOrder.delivery_address = cleanAddress;
 
@@ -210,12 +326,25 @@ router.post("/", async (req, res, next) => {
     // Online Payment -> Initialize Razorpay Order
     const razorpayOrder = await paymentService.createOrder(totalAmount, orderId);
 
-    // Save payment record
+    // Save payment record in SQL & MongoDB Atlas
     await db.run(
       `INSERT INTO payments (order_id, payment_method, gateway, gateway_order_id, amount, status)
        VALUES ($1, 'Online Payment', 'Razorpay', $2, $3, 'Created')`,
       [orderId, razorpayOrder.id, totalAmount]
     );
+
+    try {
+      await Payment.create({
+        order_id: orderId,
+        payment_method: "Online Payment",
+        gateway: "Razorpay",
+        gateway_order_id: razorpayOrder.id,
+        amount: totalAmount,
+        status: "Created"
+      });
+    } catch (mErr) {
+      console.warn("[MongoDB] Payment Atlas sync notice:", mErr.message);
+    }
 
     res.json({
       success: true,
@@ -233,93 +362,90 @@ router.post("/", async (req, res, next) => {
 
 /**
  * GET /api/orders
- * Customer view: lists orders for current logged-in customer or matches search by phone/orderId
+ * Customer view: lists orders for current logged-in customer strictly isolated by authenticated user_id
  */
 router.get("/", async (req, res, next) => {
   try {
-    const { search, phone, orderId, order_ids } = req.query;
-    let orders = [];
+    const { search, orderId } = req.query;
 
-    // Auto-link previous orders if user is authenticated
-    if (req.user && req.user.id && req.user.phone) {
-      await db.run(
-        "UPDATE orders SET user_id = $1 WHERE customer_phone = $2 AND (user_id IS NULL OR user_id = 0)",
-        [req.user.id, req.user.phone]
-      );
-    }
-
-    if (search && search.trim()) {
-      const q = search.trim();
-      const digits = q.replace(/\D/g, "");
-      const cleanId = q.startsWith("#") ? q : `#${q}`;
-
-      if (digits.length >= 6) {
-        orders = await db.all(
-          `SELECT * FROM orders 
-           WHERE customer_phone LIKE $1 
-              OR id LIKE $2 
-              OR customer_name LIKE $3 
-           ORDER BY created_at DESC LIMIT 50`,
-          [`%${digits.slice(-10)}%`, `%${q}%`, `%${q}%`]
-        );
-      } else {
-        orders = await db.all(
-          `SELECT * FROM orders 
-           WHERE id LIKE $1 
-              OR id = $2 
-              OR customer_name LIKE $3 
-           ORDER BY created_at DESC LIMIT 50`,
-          [`%${q}%`, cleanId, `%${q}%`]
-        );
-      }
-    } else if (phone && phone.trim()) {
-      const cleanPhone = phone.replace(/\D/g, "").slice(-10);
-      orders = await db.all(
-        `SELECT * FROM orders WHERE customer_phone LIKE $1 ORDER BY created_at DESC LIMIT 50`,
-        [`%${cleanPhone}%`]
-      );
-    } else if (orderId && orderId.trim()) {
-      const cleanId = orderId.trim().startsWith("#") ? orderId.trim() : `#${orderId.trim()}`;
-      orders = await db.all(
-        `SELECT * FROM orders WHERE id = $1 OR id = $2 ORDER BY created_at DESC LIMIT 10`,
-        [cleanId, orderId.trim()]
-      );
-    } else if (order_ids && order_ids.trim()) {
-      const ids = order_ids
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      if (ids.length > 0) {
-        const placeholders = ids.map((_, i) => `$${i + 1}`).join(",");
-        orders = await db.all(
-          `SELECT * FROM orders WHERE id IN (${placeholders}) ORDER BY created_at DESC LIMIT 50`,
-          ids
-        );
-      }
-    } else if (req.user) {
-      orders = await db.all(
-        `SELECT * FROM orders 
-         WHERE user_id = $1 
-            OR (customer_phone IS NOT NULL AND customer_phone = $2) 
-         ORDER BY created_at DESC LIMIT 50`,
-        [req.user.id, req.user.phone || ""]
-      );
-    } else {
+    // Authenticated customer: strictly access only their own orders by authenticated user_id
+    if (!req.user || !req.user.id) {
       return res.json({
         success: true,
         orders: [],
-        requiresAuth: true
+        requiresAuth: true,
+        message: "Please log in to view your order history."
       });
+    }
+
+    const customerId = req.user.id;
+    let mFilter = { user_id: customerId };
+
+    if (orderId && orderId.trim()) {
+      const cleanId = orderId.trim();
+      const withHash = cleanId.startsWith("#") ? cleanId : `#${cleanId}`;
+      const withoutHash = cleanId.startsWith("#") ? cleanId.slice(1) : cleanId;
+      mFilter = {
+        user_id: customerId,
+        $or: [{ id: cleanId }, { id: withHash }, { id: withoutHash }]
+      };
+    } else if (search && search.trim()) {
+      const q = search.trim();
+      mFilter = {
+        user_id: customerId,
+        $or: [
+          { id: new RegExp(q, "i") },
+          { customer_name: new RegExp(q, "i") }
+        ]
+      };
+    }
+
+    let orders = [];
+    try {
+      orders = await Order.find(mFilter).sort({ created_at: -1 }).limit(50).lean();
+    } catch (mErr) {
+      console.warn("[ORDERS] Atlas query fallback:", mErr.message);
+    }
+
+    if (!orders || orders.length === 0) {
+      if (orderId && orderId.trim()) {
+        const cleanId = orderId.trim().startsWith("#") ? orderId.trim() : `#${orderId.trim()}`;
+        orders = await db.all(
+          `SELECT * FROM orders WHERE user_id = $1 AND (id = $2 OR id = $3) ORDER BY created_at DESC LIMIT 10`,
+          [customerId, cleanId, orderId.trim()]
+        );
+      } else if (search && search.trim()) {
+        const q = search.trim();
+        const cleanId = q.startsWith("#") ? q : `#${q}`;
+        orders = await db.all(
+          `SELECT * FROM orders 
+           WHERE user_id = $1 AND (id LIKE $2 OR id = $3 OR customer_name LIKE $2) 
+           ORDER BY created_at DESC LIMIT 50`,
+          [customerId, `%${q}%`, cleanId]
+        );
+      } else {
+        orders = await db.all(
+          `SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+          [customerId]
+        );
+      }
     }
 
     const fullOrders = await Promise.all(
       orders.map(async (o) => {
-        const items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [o.id]);
-        let addr = {};
-        try {
-          addr = JSON.parse(o.delivery_address_json);
-        } catch {
-          addr = {};
+        let items = o.items && o.items.length > 0 ? o.items : [];
+        if (items.length === 0) {
+          try {
+            items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [o.id]);
+          } catch (_) {}
+        }
+        let addr = o.delivery_address || {};
+        if ((!addr || Object.keys(addr).length === 0) && o.delivery_address_json) {
+          try {
+            addr = JSON.parse(o.delivery_address_json);
+          } catch {
+            addr = {};
+          }
         }
         return {
           ...o,
@@ -349,11 +475,19 @@ router.get("/:id", async (req, res, next) => {
     const withHash = rawId.startsWith("#") ? rawId : `#${rawId}`;
     const withoutHash = rawId.startsWith("#") ? rawId.slice(1) : rawId;
 
-    // Search by exact ID, with hash, or without hash
+    // Search by exact ID, with hash, or without hash across SQLite and MongoDB Atlas
     let order = await db.get(
       "SELECT * FROM orders WHERE id = $1 OR id = $2 OR id = $3",
       [rawId, withHash, withoutHash]
     );
+
+    if (!order) {
+      try {
+        order = await Order.findOne({
+          $or: [{ id: rawId }, { id: withHash }, { id: withoutHash }]
+        }).lean();
+      } catch (_) {}
+    }
 
     // Fallback: search by suffix or partial match
     if (!order) {
@@ -361,6 +495,11 @@ router.get("/:id", async (req, res, next) => {
         "SELECT * FROM orders WHERE id LIKE $1 LIMIT 1",
         [`%${withoutHash}%`]
       );
+    }
+    if (!order) {
+      try {
+        order = await Order.findOne({ id: new RegExp(withoutHash, "i") }).lean();
+      } catch (_) {}
     }
 
     if (!order) {
@@ -370,12 +509,54 @@ router.get("/:id", async (req, res, next) => {
       });
     }
 
-    const items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [order.id]);
-    let address = {};
-    try {
-      address = JSON.parse(order.delivery_address_json);
-    } catch {
-      address = {};
+    // Authorization check: Customer can only view their own orders; admin can view all
+    if (order.user_id) {
+      if (!req.user) {
+        return res.status(401).json({
+          success: false,
+          error: "Authentication required. Please log in to view this order."
+        });
+      }
+      if (order.user_id !== req.user.id && req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied. You can only view your own orders."
+        });
+      }
+    }
+
+    let items = order.items && order.items.length > 0 ? order.items : [];
+    if (items.length === 0) {
+      items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [order.id]);
+    }
+
+    let address = order.delivery_address || {};
+    if ((!address || Object.keys(address).length === 0) && order.delivery_address_json) {
+      try {
+        address = JSON.parse(order.delivery_address_json);
+      } catch {
+        address = {};
+      }
+    }
+
+    // Mask sensitive customer PII for unauthenticated status tracking to prevent data leaks
+    let customerPhone = order.customer_phone;
+    let customerEmail = order.customer_email;
+    let safeAddress = { ...address };
+
+    if (!req.user && order.user_id) {
+      if (customerPhone) {
+        customerPhone = customerPhone.length >= 10 
+          ? customerPhone.slice(0, 2) + "******" + customerPhone.slice(-2) 
+          : "******";
+      }
+      if (customerEmail && customerEmail.includes("@")) {
+        const parts = customerEmail.split("@");
+        customerEmail = parts[0].slice(0, 2) + "***@" + parts[1];
+      }
+      if (safeAddress.flat_house) {
+        safeAddress.flat_house = "***";
+      }
     }
 
     // Build order lifecycle timeline with all 8 official statuses
@@ -437,7 +618,9 @@ router.get("/:id", async (req, res, next) => {
       success: true,
       order: {
         ...order,
-        delivery_address: address,
+        customer_phone: customerPhone,
+        customer_email: customerEmail,
+        delivery_address: safeAddress,
         items,
         timeline,
         tracking: {
@@ -459,6 +642,80 @@ router.get("/:id", async (req, res, next) => {
         fssai: OJASWI_CONSTANTS.FSSAI_LICENSE,
         location: OJASWI_CONSTANTS.PACKED_BY
       }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GET /api/orders/:id/receipt
+ * Generate official tax invoice receipt from actual order data
+ */
+router.get("/:id/receipt", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const rawId = decodeURIComponent(id).trim();
+    const withHash = rawId.startsWith("#") ? rawId : `#${rawId}`;
+    const withoutHash = rawId.startsWith("#") ? rawId.slice(1) : rawId;
+
+    let order = await Order.findOne({
+      $or: [{ id: rawId }, { id: withHash }, { id: withoutHash }]
+    }).lean();
+
+    if (!order) {
+      order = await db.get(
+        "SELECT * FROM orders WHERE id = $1 OR id = $2 OR id = $3",
+        [rawId, withHash, withoutHash]
+      );
+      if (order) {
+        order.items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [order.id]);
+      }
+    }
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        error: `Order with ID "${rawId}" was not found.`
+      });
+    }
+
+    // Authorization check: Customer can only view their own receipts; admin can view all
+    if (order.user_id) {
+      if (!req.user) {
+        return res.status(401).json({
+          success: false,
+          error: "Authentication required. Please log in to view this receipt."
+        });
+      }
+      if (order.user_id !== req.user.id && req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied. You can only view your own order receipts."
+        });
+      }
+    } else {
+      if (req.user && req.user.role !== "admin") {
+        return res.status(403).json({
+          success: false,
+          error: "Access denied. You can only view your own order receipts."
+        });
+      }
+    }
+
+    if (!order.items || order.items.length === 0) {
+      order.items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [order.id]);
+    }
+
+    const receipt = generateReceiptData(order);
+
+    if (req.query.format === "html" || (req.headers.accept && req.headers.accept.includes("text/html"))) {
+      return res.send(renderReceiptHtml(receipt));
+    }
+
+    res.json({
+      success: true,
+      receipt
     });
   } catch (err) {
     next(err);

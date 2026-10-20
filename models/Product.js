@@ -2,12 +2,12 @@ import mongoose from "mongoose";
 
 const productSchema = new mongoose.Schema(
   {
-    id: { type: Number, unique: true, index: true },
+    id: { type: Number, unique: true, index: true, required: true },
     name: { type: String, required: true, unique: true, trim: true },
-    slug: { type: String, required: true, unique: true, trim: true },
+    slug: { type: String, required: true, unique: true, trim: true, index: true },
     product_number: { type: String },
-    sku: { type: String },
-    category: { type: String, default: "Authentic Spices" },
+    sku: { type: String, index: true },
+    category: { type: String, default: "Authentic Spices", index: true },
     location: { type: String, default: "52/2, Malegaon - 423203, Nashik, Maharashtra, India" },
     description: { type: String },
     price: { type: Number, required: true },
@@ -26,5 +26,5 @@ const productSchema = new mongoose.Schema(
   }
 );
 
-export const Product = mongoose.models.Product || mongoose.model("Product", productSchema);
+export const Product = mongoose.models.Product || mongoose.model("Product", productSchema, "products");
 export default Product;

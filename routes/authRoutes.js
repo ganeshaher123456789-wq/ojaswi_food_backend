@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import express from "express";
 import bcrypt from "bcryptjs";
 import { db } from "../config/db.js";
@@ -8,13 +9,591 @@ import { validateIndianPhone, validateEmail } from "../utils/helpers.js";
 import { generateToken, setAuthCookie, clearAuthCookie, requireAuth } from "../middleware/auth.js";
 import { createRateLimiter } from "../middleware/rateLimiter.js";
 import { ENV } from "../config/env.js";
+import { User, Order } from "../models/index.js";
 
 const router = express.Router();
+
+async function syncUserToMongo(userData, extraFields = {}) {
+  try {
+    if (!userData || (!userData.id && !userData.phone && !userData.email)) return;
+    if (mongoose.connection.readyState !== 1) return;
+
+    // Calculate customer order count and total spent from MongoDB Atlas if available
+    let totalOrders = userData.total_orders;
+    let totalSpent = userData.total_spent;
+    if (userData.id && (totalOrders === undefined || totalSpent === undefined)) {
+      try {
+        const orderStats = await Order.aggregate([
+          { $match: { user_id: userData.id, order_status: { $ne: "Cancelled" } } },
+          { $group: { _id: null, count: { $sum: 1 }, spent: { $sum: "$total_amount" } } }
+        ]);
+        if (orderStats && orderStats.length > 0) {
+          totalOrders = orderStats[0].count;
+          totalSpent = orderStats[0].spent;
+        }
+      } catch (_) {}
+    }
+
+    const setObj = {
+      name: userData.name,
+      role: userData.role || "customer",
+      is_active: userData.is_active !== undefined ? Boolean(userData.is_active) : true,
+      updated_at: new Date()
+    };
+    if (userData.id) setObj.id = userData.id;
+    if (userData.phone) setObj.phone = userData.phone;
+    if (userData.email) setObj.email = userData.email;
+    if (userData.password_hash) setObj.password_hash = userData.password_hash;
+
+    if (userData.delivery_address) {
+      setObj.delivery_address = userData.delivery_address;
+      setObj.city = userData.delivery_address.city || userData.city;
+      setObj.state = userData.delivery_address.state || userData.state;
+      setObj.pincode = userData.delivery_address.pincode || userData.pincode;
+    }
+    if (userData.city) setObj.city = userData.city;
+    if (userData.state) setObj.state = userData.state;
+    if (userData.pincode) setObj.pincode = userData.pincode;
+    if (totalOrders !== undefined) setObj.total_orders = totalOrders;
+    if (totalSpent !== undefined) setObj.total_spent = totalSpent;
+    if (userData.last_login) setObj.last_login = userData.last_login;
+    if (userData.last_order_id) setObj.last_order_id = userData.last_order_id;
+    if (userData.last_order_date) setObj.last_order_date = userData.last_order_date;
+
+    if (extraFields && typeof extraFields === "object") {
+      Object.assign(setObj, extraFields);
+    }
+
+    const orConditions = [];
+    if (userData.phone) orConditions.push({ phone: userData.phone });
+    if (userData.email) orConditions.push({ email: userData.email });
+    if (userData.id) orConditions.push({ id: userData.id });
+
+    const query = orConditions.length > 1 ? { $or: orConditions } : (orConditions[0] || { id: userData.id });
+
+    await User.findOneAndUpdate(query, { $set: setObj }, { upsert: true, returnDocument: "after" }).catch((err) => {
+      console.warn("[MongoDB] User sync notice:", err.message);
+    });
+  } catch (err) {
+    console.warn("[MongoDB] User sync error:", err.message);
+  }
+}
+
+async function linkGuestOrdersToMongo(userId, phone, email) {
+  try {
+    if (mongoose.connection.readyState !== 1) return;
+    const conditions = [];
+    if (phone) conditions.push({ customer_phone: phone });
+    if (email) conditions.push({ customer_email: email });
+    if (conditions.length === 0) return;
+
+    await Order.updateMany(
+      {
+        $or: conditions,
+        $and: [
+          { $or: [{ user_id: { $exists: false } }, { user_id: null }, { user_id: 0 }] }
+        ]
+      },
+      { $set: { user_id: userId, updated_at: new Date() } }
+    ).catch((err) => console.warn("[MongoDB] Order link notice:", err.message));
+
+    // Update customer's total orders count and total spent in MongoDB Atlas
+    try {
+      const orderStats = await Order.aggregate([
+        { $match: { user_id: userId, order_status: { $ne: "Cancelled" } } },
+        { $group: { _id: null, count: { $sum: 1 }, spent: { $sum: "$total_amount" } } }
+      ]);
+      if (orderStats && orderStats.length > 0) {
+        await User.findOneAndUpdate(
+          { id: userId },
+          { total_orders: orderStats[0].count, total_spent: orderStats[0].spent }
+        ).catch(() => {});
+      }
+    } catch (_) {}
+  } catch (err) {
+    console.warn("[MongoDB] Order link error:", err.message);
+  }
+}
 
 const otpRateLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: 10,
   message: "Too many OTP requests. Please wait a minute before trying again."
+});
+
+/**
+ * 0a. Customer Registration (Save account in DB with credentials)
+ */
+router.post("/register", async (req, res, next) => {
+  try {
+    const { name, phone, email, password } = req.body;
+
+    if (!name || typeof name !== "string" || name.trim().length < 2) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter your full name (minimum 2 characters)."
+      });
+    }
+
+    const cleanName = name.trim();
+    const cleanPhone = phone ? validateIndianPhone(phone) : null;
+    const cleanEmail = email && validateEmail(email) ? email.trim().toLowerCase() : null;
+
+    if (phone && !cleanPhone) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter a valid 10-digit Indian mobile number."
+      });
+    }
+
+    if (email && !cleanEmail) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter a valid email address."
+      });
+    }
+
+    if (!cleanPhone && !cleanEmail) {
+      return res.status(400).json({
+        success: false,
+        error: "Please provide either a mobile number or email address for your account."
+      });
+    }
+
+    if (!password || typeof password !== "string" || password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: "Password must be at least 6 characters long."
+      });
+    }
+
+    // Check if account already exists across SQLite and MongoDB Atlas
+    const isMongoReady = mongoose.connection.readyState === 1;
+    let existing = null;
+    if (cleanPhone && cleanEmail) {
+      existing = await db.get(
+        "SELECT * FROM users WHERE phone = $1 OR email = $2",
+        [cleanPhone, cleanEmail]
+      );
+      if (!existing && isMongoReady) {
+        existing = await User.findOne({ $or: [{ phone: cleanPhone }, { email: cleanEmail }] }).lean().catch(() => null);
+      }
+    } else if (cleanPhone) {
+      existing = await db.get("SELECT * FROM users WHERE phone = $1", [cleanPhone]);
+      if (!existing && isMongoReady) {
+        existing = await User.findOne({ phone: cleanPhone }).lean().catch(() => null);
+      }
+    } else if (cleanEmail) {
+      existing = await db.get("SELECT * FROM users WHERE email = $1", [cleanEmail]);
+      if (!existing && isMongoReady) {
+        existing = await User.findOne({ email: cleanEmail }).lean().catch(() => null);
+      }
+    }
+
+    if (existing) {
+      const matchField = (cleanPhone && existing.phone === cleanPhone) ? "mobile number" : "email address";
+      return res.status(409).json({
+        success: false,
+        error: `An account is already registered with this ${matchField}. Please sign in with your password, or use Forgot Password.`
+      });
+    }
+
+    // Hash password securely with bcrypt
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Generate next customer ID compatible with both MongoDB Atlas and SQL
+    let nextId = Date.now();
+    try {
+      if (isMongoReady) {
+        const lastUser = await User.findOne().sort({ id: -1 }).lean().catch(() => null);
+        if (lastUser && lastUser.id && !isNaN(lastUser.id)) {
+          nextId = Math.max(lastUser.id + 1, nextId);
+        }
+      }
+    } catch (_) {}
+
+    // Insert new user into database
+    const result = await db.run(
+      `INSERT INTO users (name, phone, email, password_hash, role)
+       VALUES ($1, $2, $3, $4, 'customer')`,
+      [cleanName, cleanPhone, cleanEmail, passwordHash]
+    );
+
+    const insertedId = result.lastInsertRowid || nextId;
+    let user = await db.get("SELECT * FROM users WHERE id = $1", [insertedId]);
+    if (!user) {
+      user = {
+        id: insertedId,
+        name: cleanName,
+        phone: cleanPhone,
+        email: cleanEmail,
+        password_hash: passwordHash,
+        role: "customer"
+      };
+    } else {
+      if (cleanName) user.name = cleanName;
+      if (cleanPhone) user.phone = cleanPhone;
+      if (cleanEmail) user.email = cleanEmail;
+    }
+
+    // Create customer profile record
+    try {
+      await db.run(
+        `INSERT INTO customer_profiles (user_id) VALUES ($1)`,
+        [user.id]
+      );
+    } catch (_) {}
+
+    // Auto-link any previous guest orders matching this phone or email
+    if (cleanPhone) {
+      await db.run(
+        "UPDATE orders SET user_id = $1 WHERE customer_phone = $2 AND (user_id IS NULL OR user_id = 0)",
+        [user.id, cleanPhone]
+      );
+    }
+    if (cleanEmail) {
+      await db.run(
+        "UPDATE orders SET user_id = $1 WHERE customer_email = $2 AND (user_id IS NULL OR user_id = 0)",
+        [user.id, cleanEmail]
+      );
+    }
+
+    // Sync to MongoDB Atlas
+    await syncUserToMongo(user);
+    await linkGuestOrdersToMongo(user.id, cleanPhone, cleanEmail);
+
+    const token = generateToken({ id: user.id, role: user.role });
+    setAuthCookie(res, token);
+
+    console.log(`[CUSTOMER AUTH] Customer Account Ready: ${user.name} (+91 ${user.phone || "N/A"})`);
+
+    res.status(201).json({
+      success: true,
+      message: "Account created successfully! Welcome to Ojaswi.",
+      token,
+      user: {
+        id: user.id,
+        phone: user.phone,
+        email: user.email,
+        name: user.name,
+        role: user.role
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * 0b. Customer Login (Verify credentials with backend - OTP completely removed)
+ */
+router.post("/login", async (req, res, next) => {
+  try {
+    const { identifier, phone, email, password } = req.body;
+
+    const rawId = (identifier || phone || email || "").trim();
+    if (!rawId) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter your mobile number or email address."
+      });
+    }
+
+    if (!password || typeof password !== "string" || !password.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter your password."
+      });
+    }
+
+    let cleanPhone = null;
+    let cleanEmail = null;
+
+    if (rawId.includes("@")) {
+      cleanEmail = rawId.trim().toLowerCase();
+    } else {
+      cleanPhone = validateIndianPhone(rawId);
+    }
+
+    // Lookup user in database
+    let user = null;
+    if (cleanPhone) {
+      user = await db.get("SELECT * FROM users WHERE phone = $1", [cleanPhone]);
+    }
+    if (!user && cleanEmail) {
+      user = await db.get("SELECT * FROM users WHERE LOWER(email) = $1", [cleanEmail]);
+    }
+
+    // Flexible fallback lookup: check raw phone digits, customer name, or email prefix
+    if (!user) {
+      const trimmed = rawId.trim();
+      const digitsOnly = trimmed.replace(/\D/g, "");
+      const phone10 = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly;
+
+      if (phone10.length === 10) {
+        user = await db.get("SELECT * FROM users WHERE phone = $1", [phone10]);
+      }
+
+      if (!user) {
+        // Try lookup by customer name / username
+        user = await db.get(
+          "SELECT * FROM users WHERE LOWER(name) = $1 ORDER BY id DESC LIMIT 1",
+          [trimmed.toLowerCase()]
+        );
+      }
+
+      if (!user && cleanEmail) {
+        // Handle subtle typo in email prefix
+        const emailUserPart = cleanEmail.split("@")[0].replace(/\d+/g, "");
+        if (emailUserPart.length >= 4) {
+          const candidates = await db.all(
+            "SELECT * FROM users WHERE LOWER(email) LIKE $1 ORDER BY id DESC LIMIT 5",
+            [`%${emailUserPart}%`]
+          );
+          if (candidates && candidates.length === 1) {
+            user = candidates[0];
+          }
+        }
+      }
+
+      // Check MongoDB Atlas directly if user not found in local SQLite
+      if (!user && mongoose.connection.readyState === 1) {
+        try {
+          const mongoOr = [];
+          if (cleanPhone) mongoOr.push({ phone: cleanPhone });
+          if (cleanEmail) mongoOr.push({ email: cleanEmail });
+          if (phone10 && phone10.length === 10) mongoOr.push({ phone: phone10 });
+          mongoOr.push({ name: trimmed });
+          if (mongoOr.length > 0) {
+            const mongoUser = await User.findOne({ $or: mongoOr }).lean();
+            if (mongoUser) {
+              user = {
+                id: mongoUser.id,
+                name: mongoUser.name,
+                phone: mongoUser.phone,
+                email: mongoUser.email,
+                password_hash: mongoUser.password_hash,
+                role: mongoUser.role || "customer"
+              };
+              try {
+                await db.run(
+                  `INSERT OR REPLACE INTO users (id, name, phone, email, password_hash, role)
+                   VALUES ($1, $2, $3, $4, $5, $6)`,
+                  [user.id, user.name, user.phone, user.email, user.password_hash, user.role]
+                );
+              } catch (_) {}
+            }
+          }
+        } catch (mErr) {
+          console.warn("[AUTH LOGIN] Atlas fallback query notice:", mErr.message);
+        }
+      }
+    }
+
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        error: "No account found with this mobile number or email. Please click 'Create Account' to get started."
+      });
+    }
+
+    // If account was created without a password, auto-set their entered password now
+    if (!user.password_hash) {
+      const passwordHash = await bcrypt.hash(password, 10);
+      await db.run("UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", [passwordHash, user.id]);
+      user.password_hash = passwordHash;
+      console.log(`[CUSTOMER AUTH] Password auto-configured for existing user: ${user.name}`);
+    } else {
+      const isMatch = await bcrypt.compare(password, user.password_hash);
+      if (!isMatch) {
+        return res.status(401).json({
+          success: false,
+          error: "Incorrect password. Please verify your password or use 'Reset Password'."
+        });
+      }
+    }
+
+    // Auto-link previous guest orders
+    if (user.phone) {
+      await db.run(
+        "UPDATE orders SET user_id = $1 WHERE customer_phone = $2 AND (user_id IS NULL OR user_id = 0)",
+        [user.id, user.phone]
+      );
+    }
+    if (user.email) {
+      await db.run(
+        "UPDATE orders SET user_id = $1 WHERE customer_email = $2 AND (user_id IS NULL OR user_id = 0)",
+        [user.id, user.email]
+      );
+    }
+
+    // Sync to MongoDB Atlas and record last_login
+    await syncUserToMongo(user, { last_login: new Date() });
+    await linkGuestOrdersToMongo(user.id, user.phone, user.email);
+
+    const token = generateToken({ id: user.id, role: user.role });
+    setAuthCookie(res, token);
+
+    console.log(`[CUSTOMER AUTH] Customer Logged In: ${user.name} (+91 ${user.phone || "N/A"})`);
+
+    res.json({
+      success: true,
+      message: `Welcome back, ${user.name}! Login successful.`,
+      token,
+      user: {
+        id: user.id,
+        phone: user.phone,
+        email: user.email,
+        name: user.name,
+        role: user.role
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * 0c. Direct Password Reset (No OTP Verification Needed)
+ */
+router.post("/reset-password", async (req, res, next) => {
+  try {
+    const { identifier, phone, email, newPassword, password } = req.body;
+    const rawId = (identifier || phone || email || "").trim();
+    const targetPassword = newPassword || password;
+
+    if (!rawId) {
+      return res.status(400).json({
+        success: false,
+        error: "Please enter your registered mobile number or email address."
+      });
+    }
+
+    if (!targetPassword || typeof targetPassword !== "string" || targetPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: "New password must be at least 6 characters long."
+      });
+    }
+
+    let cleanPhone = null;
+    let cleanEmail = null;
+
+    if (rawId.includes("@")) {
+      cleanEmail = rawId.trim().toLowerCase();
+    } else {
+      cleanPhone = validateIndianPhone(rawId);
+    }
+
+    let user = null;
+    if (cleanPhone) {
+      user = await db.get("SELECT * FROM users WHERE phone = $1", [cleanPhone]);
+    }
+    if (!user && cleanEmail) {
+      user = await db.get("SELECT * FROM users WHERE LOWER(email) = $1", [cleanEmail]);
+    }
+
+    if (!user) {
+      const trimmed = rawId.trim();
+      const digitsOnly = trimmed.replace(/\D/g, "");
+      const phone10 = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly;
+      if (phone10.length === 10) {
+        user = await db.get("SELECT * FROM users WHERE phone = $1", [phone10]);
+      }
+      if (!user) {
+        user = await db.get(
+          "SELECT * FROM users WHERE LOWER(name) = $1 ORDER BY id DESC LIMIT 1",
+          [trimmed.toLowerCase()]
+        );
+      }
+      if (!user && mongoose.connection.readyState === 1) {
+        try {
+          const mongoOr = [];
+          if (cleanPhone) mongoOr.push({ phone: cleanPhone });
+          if (cleanEmail) mongoOr.push({ email: cleanEmail });
+          if (phone10 && phone10.length === 10) mongoOr.push({ phone: phone10 });
+          mongoOr.push({ name: trimmed });
+          if (mongoOr.length > 0) {
+            const mongoUser = await User.findOne({ $or: mongoOr }).lean();
+            if (mongoUser) {
+              user = {
+                id: mongoUser.id,
+                name: mongoUser.name,
+                phone: mongoUser.phone,
+                email: mongoUser.email,
+                password_hash: mongoUser.password_hash,
+                role: mongoUser.role || "customer"
+              };
+              try {
+                await db.run(
+                  `INSERT OR REPLACE INTO users (id, name, phone, email, password_hash, role)
+                   VALUES ($1, $2, $3, $4, $5, $6)`,
+                  [user.id, user.name, user.phone, user.email, user.password_hash, user.role]
+                );
+              } catch (_) {}
+            }
+          }
+        } catch (mErr) {
+          console.warn("[AUTH RESET] Atlas fallback lookup notice:", mErr.message);
+        }
+      }
+    }
+
+    const passwordHash = await bcrypt.hash(targetPassword, 10);
+
+    if (!user) {
+      // Auto-create account with the new password
+      const defaultName = cleanEmail
+        ? cleanEmail.split("@")[0]
+        : cleanPhone
+        ? `Customer ${cleanPhone.slice(-4)}`
+        : "Valued Customer";
+
+      const result = await db.run(
+        `INSERT INTO users (name, phone, email, password_hash, role)
+         VALUES ($1, $2, $3, $4, 'customer')`,
+        [defaultName, cleanPhone, cleanEmail, passwordHash]
+      );
+      user = await db.get("SELECT * FROM users WHERE id = $1", [result.lastInsertRowid]);
+      try {
+        await db.run("INSERT INTO customer_profiles (user_id) VALUES ($1)", [user.id]);
+      } catch (_) {}
+    } else {
+      await db.run(
+        "UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
+        [passwordHash, user.id]
+      );
+      user.password_hash = passwordHash;
+    }
+
+    await syncUserToMongo(user);
+    if (user.phone) {
+      await linkGuestOrdersToMongo(user.id, user.phone, null);
+    }
+    if (user.email) {
+      await linkGuestOrdersToMongo(user.id, null, user.email);
+    }
+
+    const token = generateToken({ id: user.id, role: user.role });
+    setAuthCookie(res, token);
+
+    console.log(`[CUSTOMER AUTH] Direct Password Reset Completed for ${user.name}`);
+
+    res.json({
+      success: true,
+      message: `Password updated successfully! Welcome back, ${user.name}.`,
+      token,
+      user: {
+        id: user.id,
+        phone: user.phone,
+        email: user.email,
+        name: user.name,
+        role: user.role
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 /**
@@ -102,6 +681,10 @@ router.post("/verify-phone-otp", async (req, res, next) => {
       );
     }
 
+    // Sync to MongoDB Atlas
+    await syncUserToMongo(user);
+    await linkGuestOrdersToMongo(user.id, validatedPhone, null);
+
     // Generate token and set HttpOnly cookie
     const token = generateToken({ id: user.id, role: user.role });
     setAuthCookie(res, token);
@@ -158,6 +741,10 @@ router.post("/whatsapp-login", async (req, res, next) => {
         [user.id, validatedPhone]
       );
     }
+
+    // Sync to MongoDB Atlas
+    await syncUserToMongo(user);
+    await linkGuestOrdersToMongo(user.id, validatedPhone, null);
 
     const token = generateToken({ id: user.id, role: user.role });
     setAuthCookie(res, token);
@@ -259,6 +846,10 @@ router.post("/verify-email-otp", async (req, res, next) => {
       );
     }
 
+    // Sync to MongoDB Atlas
+    await syncUserToMongo(user);
+    await linkGuestOrdersToMongo(user.id, null, cleanEmail);
+
     const token = generateToken({ id: user.id, role: user.role });
     setAuthCookie(res, token);
 
@@ -331,6 +922,10 @@ router.post("/fast-login", async (req, res, next) => {
         [user.id, validatedPhone]
       );
     }
+
+    // Sync to MongoDB Atlas
+    await syncUserToMongo(user);
+    await linkGuestOrdersToMongo(user.id, validatedPhone, cleanEmail);
 
     const token = generateToken({ id: user.id, role: user.role });
     setAuthCookie(res, token);

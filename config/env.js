@@ -28,6 +28,7 @@ export const ENV = {
   
   // Database Configuration
   MONGODB_URI: process.env.MONGODB_URI || "",
+  MONGODB_DB_NAME: process.env.MONGODB_DB_NAME || "ojaswi",
   DATABASE_URL: process.env.DATABASE_URL || "",
 
   // Frontend URL (for CORS and redirects)

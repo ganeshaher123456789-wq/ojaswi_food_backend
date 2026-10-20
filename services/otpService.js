@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { db } from "../config/db.js";
 import { ENV } from "../config/env.js";
+import { OtpRequest } from "../models/index.js";
 
 /**
  * Creates a cryptographically secure hash of the OTP code
@@ -19,25 +20,43 @@ export const otpService = {
   async generateOtp(identifier, type, ipAddress = "") {
     const now = new Date();
 
-    // 1. Check for recent unverified request
-    const recentRequest = await db.get(
+    // 1. Check for recent unverified request in SQL & MongoDB Atlas
+    let recentRequest = await db.get(
       `SELECT id, otp_hash, expires_at, created_at FROM otp_requests 
        WHERE identifier = $1 AND is_verified = 0 
        ORDER BY id DESC LIMIT 1`,
       [identifier]
     );
 
-    // If a request was made within 15 seconds, avoid hammering but allow fast resend
+    if (!recentRequest) {
+      try {
+        const mongoReq = await OtpRequest.findOne({ identifier, is_verified: 0 })
+          .sort({ created_at: -1 })
+          .lean();
+        if (mongoReq) {
+          recentRequest = {
+            id: mongoReq.id,
+            otp_hash: mongoReq.otp_hash,
+            expires_at: mongoReq.expires_at,
+            created_at: mongoReq.created_at ? mongoReq.created_at.toISOString() : null
+          };
+        }
+      } catch (_) {}
+    }
+
+    // If a request was made within cooldown window (30s), avoid hammering
+    const cooldownLimit = 30;
     if (recentRequest && recentRequest.created_at) {
       const createdStr = recentRequest.created_at.includes("T")
         ? recentRequest.created_at
         : recentRequest.created_at.replace(" ", "T") + "Z";
       const lastCreated = new Date(createdStr);
       const diffSeconds = (now.getTime() - lastCreated.getTime()) / 1000;
-      if (diffSeconds >= 0 && diffSeconds < 5) {
-        // Very fast double-click, gently delay
-        const remaining = Math.ceil(5 - diffSeconds);
-        throw new Error(`Please wait ${remaining} seconds before requesting a new code.`);
+      if (diffSeconds >= 0 && diffSeconds < cooldownLimit) {
+        const remaining = Math.ceil(cooldownLimit - diffSeconds);
+        const cooldownErr = new Error(`Please wait ${remaining} seconds before requesting a new code.`);
+        cooldownErr.status = 429;
+        throw cooldownErr;
       }
     }
 
@@ -47,14 +66,29 @@ export const otpService = {
 
     // 3. Generous Expiry Date (30 minutes) to prevent accidental timeout
     const expiryMinutes = 30;
-    const expiresAt = new Date(now.getTime() + expiryMinutes * 60 * 1000).toISOString();
+    const expiresAt = new Date(now.getTime() + expiryMinutes * 60 * 1000);
 
-    // 4. Save to database with ISO created_at
+    // 4. Save to SQL database
     await db.run(
       `INSERT INTO otp_requests (identifier, type, otp_hash, expires_at, attempts, is_verified, ip_address, created_at)
        VALUES ($1, $2, $3, $4, 0, 0, $5, $6)`,
-      [identifier, type, otpHash, expiresAt, ipAddress, now.toISOString()]
+      [identifier, type, otpHash, expiresAt.toISOString(), ipAddress, now.toISOString()]
     );
+
+    // 4b. Persist OTP request in MongoDB Atlas
+    try {
+      await OtpRequest.create({
+        identifier,
+        type,
+        otp_hash: otpHash,
+        expires_at: expiresAt,
+        attempts: 0,
+        is_verified: 0,
+        ip_address: ipAddress
+      });
+    } catch (mErr) {
+      console.warn("[MongoDB] OtpRequest Atlas notice:", mErr.message);
+    }
 
     return {
       rawOtp,
@@ -77,13 +111,25 @@ export const otpService = {
     // Universal dev master code fallback for instant testing/demonstration
     const isMasterCode = cleanOtp === "762009" || cleanOtp === "123456";
 
-    // Fetch the 5 most recent unverified requests for this identifier within 30 minutes
-    const recentRequests = await db.all(
+    // Fetch the 5 most recent unverified requests for this identifier
+    let recentRequests = await db.all(
       `SELECT * FROM otp_requests 
        WHERE identifier = $1 AND is_verified = 0 
        ORDER BY id DESC LIMIT 5`,
       [identifier]
     );
+
+    if ((!recentRequests || recentRequests.length === 0) && !isMasterCode) {
+      try {
+        const mongoList = await OtpRequest.find({ identifier, is_verified: 0 })
+          .sort({ created_at: -1 })
+          .limit(5)
+          .lean();
+        if (mongoList && mongoList.length > 0) {
+          recentRequests = mongoList;
+        }
+      } catch (_) {}
+    }
 
     if ((!recentRequests || recentRequests.length === 0) && !isMasterCode) {
       throw new Error("No active verification code found. Please request a new code.");
@@ -116,22 +162,36 @@ export const otpService = {
 
     if (!matchedRequest && !isMasterCode) {
       // Increment attempt count on the most recent request
-      if (recentRequests && recentRequests[0]) {
+      if (recentRequests && recentRequests[0] && recentRequests[0].id) {
         await db.run(
           `UPDATE otp_requests SET attempts = attempts + 1 WHERE id = $1`,
           [recentRequests[0].id]
         );
       }
+      try {
+        await OtpRequest.findOneAndUpdate(
+          { identifier, is_verified: 0 },
+          { $inc: { attempts: 1 } },
+          { sort: { created_at: -1 } }
+        );
+      } catch (_) {}
       throw new Error("Incorrect verification code. Please check the code and try again.");
     }
 
-    // Mark matched request as verified
-    if (matchedRequest) {
+    // Mark matched request as verified in SQL and MongoDB Atlas
+    if (matchedRequest && matchedRequest.id) {
       await db.run(
         `UPDATE otp_requests SET is_verified = 1 WHERE id = $1`,
         [matchedRequest.id]
       );
     }
+    try {
+      await OtpRequest.findOneAndUpdate(
+        { identifier, is_verified: 0 },
+        { is_verified: 1 },
+        { sort: { created_at: -1 } }
+      );
+    } catch (_) {}
 
     return {
       success: true,
@@ -140,3 +200,5 @@ export const otpService = {
     };
   }
 };
+
+export default otpService;

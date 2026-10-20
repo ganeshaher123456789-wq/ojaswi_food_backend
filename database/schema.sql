@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     phone TEXT UNIQUE,
     email TEXT UNIQUE,
     name TEXT,
+    password_hash TEXT,
     role TEXT DEFAULT 'customer',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP

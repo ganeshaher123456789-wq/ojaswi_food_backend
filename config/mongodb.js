@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { ENV } from "./env.js";
 
-let isConnecting = false;
+let connectPromise = null;
 
 export async function connectMongo() {
   if (!ENV.MONGODB_URI) {
@@ -12,48 +12,52 @@ export async function connectMongo() {
     };
   }
 
-  // Already connected or connecting
+  // Already connected
   if (mongoose.connection.readyState === 1) {
     return { connected: true, configured: true };
   }
-  if (isConnecting) {
-    return { connected: false, configured: true, pending: true };
+
+  // If a connection attempt is already in flight, reuse the promise
+  if (connectPromise) {
+    return connectPromise;
   }
 
-  isConnecting = true;
+  connectPromise = (async () => {
+    try {
+      const sanitizedUri = ENV.MONGODB_URI.replace(/:([^:@]+)@/, ":****@");
+      console.log(`[MongoDB] Connecting to MongoDB Atlas (${sanitizedUri})...`);
 
-  try {
-    // Sanitize connection URI for log display (never expose credentials)
-    const sanitizedUri = ENV.MONGODB_URI.replace(/:([^:@]+)@/, ":****@");
-    console.log(`[MongoDB] Connecting to MongoDB Atlas (${sanitizedUri})...`);
+      mongoose.connection.on("connected", () => {
+        console.log("[MongoDB] Connection established successfully to MongoDB Atlas.");
+      });
 
-    mongoose.connection.on("connected", () => {
-      console.log("[MongoDB] Connection established successfully to MongoDB Atlas.");
-    });
+      mongoose.connection.on("error", (err) => {
+        console.error("[MongoDB] Connection error:", err.message);
+      });
 
-    mongoose.connection.on("error", (err) => {
-      console.error("[MongoDB] Connection error:", err.message);
-    });
+      mongoose.connection.on("disconnected", () => {
+        console.warn("[MongoDB] Disconnected from MongoDB Atlas.");
+      });
 
-    mongoose.connection.on("disconnected", () => {
-      console.warn("[MongoDB] Disconnected from MongoDB Atlas.");
-    });
+      await mongoose.connect(ENV.MONGODB_URI, {
+        dbName: process.env.MONGODB_DB_NAME || "ojaswi",
+        maxPoolSize: 10,
+        minPoolSize: 2,
+        serverSelectionTimeoutMS: 8000,
+        socketTimeoutMS: 45000,
+        family: 4 // IPv4 preference
+      });
 
-    await mongoose.connect(ENV.MONGODB_URI, {
-      maxPoolSize: 10,
-      minPoolSize: 2,
-      serverSelectionTimeoutMS: 5000,
-      socketTimeoutMS: 45000,
-      family: 4 // IPv4 preference
-    });
+      return { connected: true, configured: true };
+    } catch (err) {
+      console.error("[MongoDB] Failed to connect to MongoDB Atlas:", err.message);
+      return { connected: false, configured: true, error: err.message };
+    } finally {
+      connectPromise = null;
+    }
+  })();
 
-    isConnecting = false;
-    return { connected: true, configured: true };
-  } catch (err) {
-    isConnecting = false;
-    console.error("[MongoDB] Failed to connect to MongoDB Atlas:", err.message);
-    return { connected: false, configured: true, error: err.message };
-  }
+  return connectPromise;
 }
 
 export function getMongoStatus() {
@@ -67,7 +71,8 @@ export function getMongoStatus() {
   return {
     configured: Boolean(ENV.MONGODB_URI),
     state: stateMap[state] || "unknown",
-    connected: state === 1
+    connected: state === 1,
+    database: state === 1 ? mongoose.connection.name : null
   };
 }
 

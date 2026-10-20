@@ -18,6 +18,10 @@ import accountRoutes from "./routes/accountRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
 import reviewRoutes from "./routes/reviewRoutes.js";
+import cartRoutes from "./routes/cartRoutes.js";
+import categoryRoutes from "./routes/categoryRoutes.js";
+import { connectMongo, getMongoStatus } from "./config/mongodb.js";
+import { syncMongoAtlas } from "./services/mongoSyncService.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -32,9 +36,13 @@ const defaultAllowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5000",
   "http://localhost:5173",
+  "http://localhost:5500",
+  "http://localhost:8080",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:5000",
-  "http://127.0.0.1:5173"
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:5500",
+  "http://127.0.0.1:8080"
 ];
 
 if (ENV.FRONTEND_URL) {
@@ -44,8 +52,8 @@ if (ENV.FRONTEND_URL) {
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests without Origin header (curl, mobile apps, server-to-server)
-      if (!origin) return callback(null, true);
+      // Allow requests without Origin header (curl, mobile apps, server-to-server) or file:// origin 'null'
+      if (!origin || origin === "null") return callback(null, true);
 
       const normalizedOrigin = origin.replace(/\/+$/, "");
 
@@ -109,6 +117,8 @@ if (fs.existsSync(frontendPath)) {
 // REST API Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);
+app.use("/api/categories", categoryRoutes);
+app.use("/api/cart", cartRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/account", accountRoutes);
@@ -120,14 +130,20 @@ app.use("/api/reviews", reviewRoutes);
 async function handleHealthCheck(req, res) {
   try {
     const dbHealth = await db.checkHealth();
-    const isHealthy = dbHealth.healthy !== false;
+    const mongoStatus = getMongoStatus();
+    const isHealthy = dbHealth.healthy !== false || mongoStatus.connected;
 
     const payload = {
       status: isHealthy ? "ok" : "degraded",
       app: "Ojaswi Foods E-Commerce API",
       environment: ENV.NODE_ENV,
-      database: dbHealth.type,
+      database: mongoStatus.connected ? "MongoDB Atlas" : dbHealth.type,
       databaseConnected: isHealthy,
+      mongoAtlas: {
+        connected: mongoStatus.connected,
+        database: mongoStatus.database || "ojaswi",
+        host: mongoStatus.host || "Atlas Cluster"
+      },
       time: new Date().toISOString()
     };
 
@@ -172,13 +188,8 @@ app.get("/orders", sendPage("orders.html"));
 app.get("/checkout", sendPage("checkout.html"));
 app.get("/order-confirmation", sendPage("order-confirmation.html"));
 
-// Admin routes SPA handling
-app.get("/admin", sendPage("admin.html"));
-app.get("/admin/login", sendPage("admin.html"));
-app.get("/admin/dashboard", sendPage("admin.html"));
-app.get("/admin/orders", sendPage("admin.html"));
-app.get("/admin/products", sendPage("admin.html"));
-app.get("/admin/customers", sendPage("admin.html"));
+// Legacy admin routes redirect to customer login
+app.get(["/admin", "/admin/*"], (req, res) => res.redirect(301, "/login"));
 
 // Legal & Info pages
 app.get("/privacy-policy", sendPage("privacy-policy.html"));
@@ -195,15 +206,32 @@ app.use(errorHandler);
 async function startServer() {
   try {
     await seedDatabase();
-    app.listen(ENV.PORT, "0.0.0.0", () => {
+
+    // Connect to MongoDB Atlas and synchronize collections
+    try {
+      await connectMongo();
+      await syncMongoAtlas();
+    } catch (mongoErr) {
+      console.warn("[MongoDB] Startup sync notice:", mongoErr.message);
+    }
+
+    const host = process.env.NODE_ENV === "production" ? "0.0.0.0" : undefined;
+    const mongoStatus = getMongoStatus();
+    const serverCallback = () => {
       console.log("==================================================");
       console.log(`[OK] OJASWI PREMIUM E-COMMERCE SERVER RUNNING`);
-      console.log(`>> Host Binding: 0.0.0.0:${ENV.PORT}`);
+      console.log(`>> Host Binding: ${host || "localhost"}:${ENV.PORT}`);
       console.log(`>> Environment:  ${ENV.NODE_ENV}`);
-      console.log(`>> Health Check: http://0.0.0.0:${ENV.PORT}/health`);
-      console.log(`>> Database:     ${db.isMongo ? "MongoDB Atlas" : db.isPostgres ? "PostgreSQL" : "SQLite Embedded"}`);
+      console.log(`>> Health Check: http://localhost:${ENV.PORT}/health`);
+      console.log(`>> Database:     ${mongoStatus.connected ? "MongoDB Atlas (" + (mongoStatus.database || "ojaswi") + ")" : db.isMongo ? "MongoDB Atlas" : db.isPostgres ? "PostgreSQL" : "SQLite Embedded"}`);
       console.log("==================================================");
-    });
+    };
+
+    if (host) {
+      app.listen(ENV.PORT, host, serverCallback);
+    } else {
+      app.listen(ENV.PORT, serverCallback);
+    }
   } catch (err) {
     console.error("Failed to start server:", err);
     process.exit(1);

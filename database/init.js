@@ -28,6 +28,7 @@ export async function initDatabase() {
         }
       };
 
+      await safeAddColumn("users", "password_hash TEXT");
       await safeAddColumn("products", "sku TEXT");
       await safeAddColumn("products", "category TEXT DEFAULT 'Authentic Spices'");
       await safeAddColumn("products", "location TEXT DEFAULT '52/2, Malegaon - 423203, Nashik, Maharashtra, India'");

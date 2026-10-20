@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 
 const addressSchema = new mongoose.Schema(
   {
+    id: { type: Number, index: true },
     user_id: { type: Number, required: true, index: true },
     full_name: { type: String, required: true },
     phone: { type: String, required: true },
@@ -18,5 +19,7 @@ const addressSchema = new mongoose.Schema(
   }
 );
 
-export const Address = mongoose.models.Address || mongoose.model("Address", addressSchema);
+addressSchema.index({ user_id: 1, is_default: -1 });
+
+export const Address = mongoose.models.Address || mongoose.model("Address", addressSchema, "addresses");
 export default Address;

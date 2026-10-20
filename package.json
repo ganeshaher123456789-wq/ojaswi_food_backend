@@ -10,6 +10,7 @@
     "db:init": "node database/init.js",
     "db:seed": "node database/seed.js",
     "test": "node tests/test-runner.js",
+    "test:mongo": "node tests/test-mongodb-atlas.js",
     "test:otp": "node tests/test-phone-otp.js"
   },
   "keywords": [

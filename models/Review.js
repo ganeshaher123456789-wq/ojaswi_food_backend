@@ -2,7 +2,9 @@ import mongoose from "mongoose";
 
 const reviewSchema = new mongoose.Schema(
   {
+    id: { type: Number, index: true },
     product_id: { type: Number, required: true, index: true },
+    product_name: { type: String },
     user_id: { type: Number },
     order_id: { type: String },
     customer_name: { type: String, required: true },
@@ -11,7 +13,7 @@ const reviewSchema = new mongoose.Schema(
     review_title: { type: String },
     review_text: { type: String },
     image_url: { type: String },
-    verified_purchase: { type: Number, default: 1 },
+    is_verified_buyer: { type: Number, default: 1 },
     is_approved: { type: Number, default: 1, index: true }
   },
   {
@@ -19,5 +21,7 @@ const reviewSchema = new mongoose.Schema(
   }
 );
 
-export const Review = mongoose.models.Review || mongoose.model("Review", reviewSchema);
+reviewSchema.index({ product_id: 1, is_approved: 1, created_at: -1 });
+
+export const Review = mongoose.models.Review || mongoose.model("Review", reviewSchema, "reviews");
 export default Review;

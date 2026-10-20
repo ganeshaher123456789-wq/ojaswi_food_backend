@@ -56,8 +56,28 @@ class DatabaseAdapter {
       try {
         this.sqlite.exec("PRAGMA journal_mode = WAL;");
         this.sqlite.exec("PRAGMA foreign_keys = ON;");
+
+        // Safe auto-migration for required columns
+        const safeAddCol = (tbl, col) => {
+          try {
+            this.sqlite.exec(`ALTER TABLE ${tbl} ADD COLUMN ${col};`);
+          } catch (_) {}
+        };
+        safeAddCol("users", "password_hash TEXT");
+        safeAddCol("products", "sku TEXT");
+        safeAddCol("products", "category TEXT DEFAULT 'Authentic Spices'");
+        safeAddCol("products", "location TEXT DEFAULT '52/2, Malegaon - 423203, Nashik, Maharashtra, India'");
+        safeAddCol("products", "images_json TEXT");
+        safeAddCol("orders", "discount_amount REAL DEFAULT 0");
+        safeAddCol("orders", "tracking_note TEXT");
+        safeAddCol("orders", "delivery_spot TEXT");
+        safeAddCol("orders", "dispatched_at TIMESTAMP");
+        safeAddCol("orders", "delivered_at TIMESTAMP");
+        safeAddCol("order_items", "product_image TEXT");
+        safeAddCol("order_items", "product_location TEXT");
+        safeAddCol("order_items", "sku TEXT");
       } catch (err) {
-        console.warn("[DB] Note on PRAGMA settings:", err.message);
+        console.warn("[DB] Note on PRAGMA/migration settings:", err.message);
       }
     }
   }
@@ -121,21 +141,13 @@ class DatabaseAdapter {
   }
 
   async checkHealth() {
-    if (this.isMongo) {
-      const mongoStatus = getMongoStatus();
-      if (!mongoStatus.connected) {
-        return {
-          healthy: false,
-          type: "mongodb",
-          status: mongoStatus.state,
-          error: "MongoDB connection is not in connected state"
-        };
+    if (this.sqlite) {
+      try {
+        this.sqlite.prepare("SELECT 1").get();
+        return { healthy: true, type: "sqlite", status: "connected" };
+      } catch (err) {
+        return { healthy: false, type: "sqlite", error: err.message };
       }
-      return {
-        healthy: true,
-        type: "mongodb",
-        status: "connected"
-      };
     }
 
     if (this.isPostgres) {

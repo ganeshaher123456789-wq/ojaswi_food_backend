@@ -4,6 +4,7 @@ import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
 import { db } from "../config/db.js";
+import { Review } from "../models/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -77,21 +78,38 @@ function computeSummary(reviews) {
 router.get("/", async (req, res, next) => {
   try {
     const { product_id, limit = 50, featured } = req.query;
-    let query = "SELECT * FROM reviews WHERE is_approved = 1";
-    let params = [];
+    let reviews = [];
 
-    if (product_id) {
-      query += " AND product_id = $1";
-      params.push(parseInt(product_id, 10));
+    try {
+      const filter = { is_approved: 1 };
+      if (product_id) filter.product_id = parseInt(product_id, 10);
+      if (featured === "true" || featured === "1") {
+        filter.rating = { $gte: 4 };
+        filter.image_url = { $exists: true, $ne: "" };
+      }
+      reviews = await Review.find(filter)
+        .sort({ created_at: -1 })
+        .limit(Math.min(100, parseInt(limit, 10) || 50))
+        .lean();
+    } catch (_) {}
+
+    if (!reviews || reviews.length === 0) {
+      let query = "SELECT * FROM reviews WHERE is_approved = 1";
+      let params = [];
+
+      if (product_id) {
+        query += " AND product_id = $1";
+        params.push(parseInt(product_id, 10));
+      }
+
+      if (featured === "true" || featured === "1") {
+        query += " AND rating >= 4 AND image_url IS NOT NULL AND image_url != ''";
+      }
+
+      query += " ORDER BY created_at DESC LIMIT " + Math.min(100, parseInt(limit, 10) || 50);
+      reviews = await db.all(query, params);
     }
 
-    if (featured === "true" || featured === "1") {
-      query += " AND rating >= 4 AND image_url IS NOT NULL AND image_url != ''";
-    }
-
-    query += " ORDER BY created_at DESC LIMIT " + Math.min(100, parseInt(limit, 10) || 50);
-
-    const reviews = await db.all(query, params);
     const summary = computeSummary(reviews);
 
     res.json({
@@ -115,10 +133,19 @@ router.get("/product/:productId", async (req, res, next) => {
       return res.status(400).json({ success: false, error: "Valid Product ID is required." });
     }
 
-    const reviews = await db.all(
-      "SELECT * FROM reviews WHERE product_id = $1 AND is_approved = 1 ORDER BY created_at DESC",
-      [productId]
-    );
+    let reviews = [];
+    try {
+      reviews = await Review.find({ product_id: productId, is_approved: 1 })
+        .sort({ created_at: -1 })
+        .lean();
+    } catch (_) {}
+
+    if (!reviews || reviews.length === 0) {
+      reviews = await db.all(
+        "SELECT * FROM reviews WHERE product_id = $1 AND is_approved = 1 ORDER BY created_at DESC",
+        [productId]
+      );
+    }
 
     const summary = computeSummary(reviews);
 
@@ -237,6 +264,26 @@ router.post("/", (req, res, next) => {
           isVerified
         ]
       );
+
+      try {
+        await Review.create({
+          id: result.lastInsertRowid,
+          product_id: product.id,
+          product_name: product.name,
+          order_id: cleanOrderId,
+          user_id: userId,
+          customer_name: customer_name.trim(),
+          customer_phone: customer_phone ? customer_phone.trim() : (req.user ? req.user.phone : null),
+          rating: numRating,
+          review_title: review_title ? review_title.trim() : `${numRating} Star Experience`,
+          review_text: review_text.trim(),
+          image_url: imageUrl,
+          is_verified_buyer: isVerified,
+          is_approved: 1
+        });
+      } catch (mErr) {
+        console.warn("[MongoDB] Review Atlas sync notice:", mErr.message);
+      }
 
       const newReview = await db.get("SELECT * FROM reviews WHERE id = $1", [result.lastInsertRowid]);
 

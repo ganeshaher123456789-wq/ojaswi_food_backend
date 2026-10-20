@@ -1,8 +1,9 @@
 import app from "../server.js";
 
 async function verify() {
-  const PORT = 5055;
-  const server = app.listen(PORT, "0.0.0.0");
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  const PORT = server.address().port;
   const baseUrl = `http://127.0.0.1:${PORT}`;
 
   console.log(`[Verification Server] Started at ${baseUrl}`);

@@ -1,12 +1,13 @@
 import express from "express";
 import { db } from "../config/db.js";
+import { ContactEnquiry } from "../models/index.js";
 import { validateIndianPhone, validateEmail } from "../utils/helpers.js";
 
 const router = express.Router();
 
 /**
  * POST /api/contact
- * Handles contact form submissions
+ * Handles contact form submissions, saving to MongoDB Atlas
  */
 router.post("/", async (req, res, next) => {
   try {
@@ -34,6 +35,7 @@ router.post("/", async (req, res, next) => {
       });
     }
 
+    // Save in SQL database
     await db.run(
       `INSERT INTO enquiries (name, phone, email, subject, message)
        VALUES ($1, $2, $3, $4, $5)`,
@@ -45,6 +47,20 @@ router.post("/", async (req, res, next) => {
         message.trim()
       ]
     );
+
+    // Save in MongoDB Atlas
+    try {
+      await ContactEnquiry.create({
+        name: name.trim(),
+        phone: cleanPhone,
+        email: email ? email.trim().toLowerCase() : null,
+        subject: subject ? subject.trim() : "Website Enquiry",
+        message: message.trim(),
+        status: "new"
+      });
+    } catch (mErr) {
+      console.warn("[MongoDB] Contact enquiry sync notice:", mErr.message);
+    }
 
     console.log(`[Contact] New enquiry from ${name} (${cleanPhone}): ${subject}`);
 
