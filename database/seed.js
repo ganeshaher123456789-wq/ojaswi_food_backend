@@ -238,6 +238,86 @@ export const INITIAL_PRODUCTS = [
     ],
     stock: 75,
     is_active: 1
+  },
+  {
+    name: "Tea Masala",
+    slug: "tea-masala",
+    product_number: "12 / PREMIUM",
+    sku: "OJ-TM-12",
+    category: "Chai & Beverage Spices",
+    location: "52/2, Malegaon - 423203, Nashik, Maharashtra, India",
+    description: "An exotic aromatic blend of royal dry spices including green cardamom, cinnamon, cloves, dry ginger, black pepper and nutmeg. Brew the ultimate cup of authentic Indian masala chai.",
+    price: 199,
+    mrp: 249,
+    selling_price: 199,
+    weight: "NET WEIGHT 500g",
+    image: "images/tea-masala.jpeg",
+    image_backup: "images/tea-masala.jpeg",
+    images: [
+      "images/tea-masala.jpeg"
+    ],
+    stock: 100,
+    is_active: 1
+  },
+  {
+    name: "Jaljeera Masala",
+    slug: "jaljeera-masala",
+    product_number: "13 / PREMIUM",
+    sku: "OJ-JM-13",
+    category: "Cooling Beverages & Refreshers",
+    location: "52/2, Malegaon - 423203, Nashik, Maharashtra, India",
+    description: "A refreshing zesty blend of dry mint, roasted cumin, black salt, amchur, ginger and hing. Instant digestive, revitalizing summer cooler and appetizing thirst-quencher.",
+    price: 199,
+    mrp: 249,
+    selling_price: 199,
+    weight: "NET WEIGHT 500g",
+    image: "images/jaljeera-masala.jpeg",
+    image_backup: "images/jaljeera-masala.jpeg",
+    images: [
+      "images/jaljeera-masala.jpeg"
+    ],
+    stock: 100,
+    is_active: 1
+  },
+  {
+    name: "Kasuri Methi",
+    slug: "kasuri-methi",
+    product_number: "14 / PREMIUM",
+    sku: "OJ-KM-14",
+    category: "Herbal Seasoning & Leaves",
+    location: "52/2, Malegaon - 423203, Nashik, Maharashtra, India",
+    description: "Handpicked, shade-dried aromatic fenugreek leaves from pristine harvest fields. Infuses restaurant-grade richness and lingering gourmet aroma into curries, dal makhani, and parathas.",
+    price: 99,
+    mrp: 149,
+    selling_price: 99,
+    weight: "NET WEIGHT 50g",
+    image: "images/kasuri-methi.jpeg",
+    image_backup: "images/kasuri-methi.jpeg",
+    images: [
+      "images/kasuri-methi.jpeg"
+    ],
+    stock: 120,
+    is_active: 1
+  },
+  {
+    name: "Dry Ginger Powder",
+    slug: "dry-ginger-powder",
+    product_number: "15 / PREMIUM",
+    sku: "OJ-GP-15",
+    category: "Pure Stone-Ground Powders",
+    location: "52/2, Malegaon - 423203, Nashik, Maharashtra, India",
+    description: "Finely stone-ground premium sun-dried ginger (Saunth / Sonth) with potent natural gingerol. Imparts warming aroma and sharp zest to masala chai, ayurvedic brews, marinades and curries.",
+    price: 199,
+    mrp: 249,
+    selling_price: 199,
+    weight: "NET WEIGHT 500g",
+    image: "images/dry-ginger-powder.jpeg",
+    image_backup: "images/dry-ginger-powder.jpeg",
+    images: [
+      "images/dry-ginger-powder.jpeg"
+    ],
+    stock: 100,
+    is_active: 1
   }
 ];
 

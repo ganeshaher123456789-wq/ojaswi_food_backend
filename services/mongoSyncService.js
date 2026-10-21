@@ -91,7 +91,7 @@ export async function syncMongoAtlas() {
 
   // 1. Sync Products Collection
   const productCount = await Product.countDocuments();
-  if (productCount === 0 || productCount < 11) {
+  if (productCount === 0 || productCount < INITIAL_PRODUCTS.length) {
     console.log("[MongoSync] Seeding Products to MongoDB Atlas...");
     for (let i = 0; i < INITIAL_PRODUCTS.length; i++) {
       const p = INITIAL_PRODUCTS[i];

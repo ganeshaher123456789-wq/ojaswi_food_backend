@@ -150,17 +150,15 @@ router.post("/", async (req, res, next) => {
           orderId: recentDuplicate.id,
           order: recentDuplicate,
           items: recentDuplicate.items && recentDuplicate.items.length > 0 ? recentDuplicate.items : orderItems,
-          requiresOnlinePayment: recentDuplicate.payment_method !== OJASWI_CONSTANTS.PAYMENT_METHODS.COD && recentDuplicate.payment_status !== "Paid"
+          requiresOnlinePayment: false
         });
       }
     } catch (_) {}
 
     const orderId = generateOrderId();
-    const isCOD = payment_method === OJASWI_CONSTANTS.PAYMENT_METHODS.COD;
-    const paymentStatus = isCOD
-      ? OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING
-      : "Payment Pending";
-    const orderStatus = isCOD ? "Confirmed" : "Pending";
+    const isCOD = true;
+    const paymentStatus = OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING;
+    const orderStatus = "Confirmed";
 
     // Associate order with verified authenticated customer ID, or auto-match registered customer by phone/email
     let userId = req.user ? req.user.id : null;
