@@ -156,9 +156,11 @@ router.post("/", async (req, res, next) => {
     } catch (_) {}
 
     const orderId = generateOrderId();
-    const isCOD = true;
-    const paymentStatus = OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING;
-    const orderStatus = "Confirmed";
+    const isCOD = !payment_method || 
+                  payment_method.toLowerCase().includes("cash on delivery") || 
+                  payment_method.toLowerCase().includes("cod");
+    const paymentStatus = isCOD ? OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING : "Created";
+    const orderStatus = isCOD ? "Confirmed" : "Pending";
 
     // Associate order with verified authenticated customer ID, or auto-match registered customer by phone/email
     let userId = req.user ? req.user.id : null;
@@ -507,20 +509,35 @@ router.get("/:id", async (req, res, next) => {
       });
     }
 
-    // Authorization check: Customer can only view their own orders; admin can view all
-    if (order.user_id) {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          error: "Authentication required. Please log in to view this order."
-        });
-      }
-      if (order.user_id !== req.user.id && req.user.role !== "admin") {
-        return res.status(403).json({
-          success: false,
-          error: "Access denied. You can only view your own orders."
-        });
-      }
+    // Strict Customer Data Isolation: Customer can only view their own orders; admin can view all
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: "Authentication required. Please log in to view this order."
+      });
+    }
+
+    const isMatch = req.user.role === "admin" ||
+                    (order.user_id && order.user_id === req.user.id) ||
+                    (req.user.phone && order.customer_phone === req.user.phone) ||
+                    (req.user.email && order.customer_email && order.customer_email.toLowerCase() === req.user.email.toLowerCase());
+
+    if (!isMatch) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You can only view your own orders."
+      });
+    }
+
+    // Auto-link order to authenticated customer if unlinked
+    if (!order.user_id && req.user.id) {
+      order.user_id = req.user.id;
+      try {
+        await db.run("UPDATE orders SET user_id = $1 WHERE id = $2", [req.user.id, order.id]);
+        if (mongoose.connection.readyState === 1) {
+          await Order.findOneAndUpdate({ id: order.id }, { $set: { user_id: req.user.id } });
+        }
+      } catch (_) {}
     }
 
     let items = order.items && order.items.length > 0 ? order.items : [];
@@ -678,27 +695,35 @@ router.get("/:id/receipt", async (req, res, next) => {
       });
     }
 
-    // Authorization check: Customer can only view their own receipts; admin can view all
-    if (order.user_id) {
-      if (!req.user) {
-        return res.status(401).json({
-          success: false,
-          error: "Authentication required. Please log in to view this receipt."
-        });
-      }
-      if (order.user_id !== req.user.id && req.user.role !== "admin") {
-        return res.status(403).json({
-          success: false,
-          error: "Access denied. You can only view your own order receipts."
-        });
-      }
-    } else {
-      if (req.user && req.user.role !== "admin") {
-        return res.status(403).json({
-          success: false,
-          error: "Access denied. You can only view your own order receipts."
-        });
-      }
+    // Strict Receipt Authorization: Customer can only view their own receipts; admin can view all
+    if (!req.user) {
+      return res.status(401).json({
+        success: false,
+        error: "Authentication required. Please log in to view this receipt."
+      });
+    }
+
+    const isMatch = req.user.role === "admin" ||
+                    (order.user_id && order.user_id === req.user.id) ||
+                    (req.user.phone && order.customer_phone === req.user.phone) ||
+                    (req.user.email && order.customer_email && order.customer_email.toLowerCase() === req.user.email.toLowerCase());
+
+    if (!isMatch) {
+      return res.status(403).json({
+        success: false,
+        error: "Access denied. You can only view your own order receipts."
+      });
+    }
+
+    // Auto-link order if needed
+    if (!order.user_id && req.user.id) {
+      order.user_id = req.user.id;
+      try {
+        await db.run("UPDATE orders SET user_id = $1 WHERE id = $2", [req.user.id, order.id]);
+        if (mongoose.connection.readyState === 1) {
+          await Order.findOneAndUpdate({ id: order.id }, { $set: { user_id: req.user.id } });
+        }
+      } catch (_) {}
     }
 
     if (!order.items || order.items.length === 0) {

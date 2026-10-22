@@ -64,6 +64,8 @@ class DatabaseAdapter {
           } catch (_) {}
         };
         safeAddCol("users", "password_hash TEXT");
+        safeAddCol("users", "google_id TEXT");
+        safeAddCol("users", "google_picture TEXT");
         safeAddCol("products", "sku TEXT");
         safeAddCol("products", "category TEXT DEFAULT 'Authentic Spices'");
         safeAddCol("products", "location TEXT DEFAULT '52/2, Malegaon - 423203, Nashik, Maharashtra, India'");

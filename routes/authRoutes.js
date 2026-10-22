@@ -44,6 +44,8 @@ async function syncUserToMongo(userData, extraFields = {}) {
     if (userData.phone) setObj.phone = userData.phone;
     if (userData.email) setObj.email = userData.email;
     if (userData.password_hash) setObj.password_hash = userData.password_hash;
+    if (userData.google_id) setObj.google_id = userData.google_id;
+    if (userData.google_picture) setObj.google_picture = userData.google_picture;
 
     if (userData.delivery_address) {
       setObj.delivery_address = userData.delivery_address;
@@ -67,6 +69,7 @@ async function syncUserToMongo(userData, extraFields = {}) {
     const orConditions = [];
     if (userData.phone) orConditions.push({ phone: userData.phone });
     if (userData.email) orConditions.push({ email: userData.email });
+    if (userData.google_id) orConditions.push({ google_id: userData.google_id });
     if (userData.id) orConditions.push({ id: userData.id });
 
     const query = orConditions.length > 1 ? { $or: orConditions } : (orConditions[0] || { id: userData.id });
@@ -589,6 +592,255 @@ router.post("/reset-password", async (req, res, next) => {
         email: user.email,
         name: user.name,
         role: user.role
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * 0d. Google Sign-In & Customer Registration
+ * Handles Google OAuth login and registration.
+ * - For returning customers: signs in without creating duplicate accounts and returns session.
+ * - For new customers: requires 10-digit mobile number, verifies Indian format, and registers in MongoDB Atlas.
+ */
+router.post("/google", async (req, res, next) => {
+  try {
+    const { credential, email, name, phone, googleId, picture } = req.body;
+
+    let extractedEmail = email;
+    let extractedName = name;
+    let extractedSub = googleId;
+    let extractedPic = picture;
+
+    // Decode Google ID Token (JWT) if passed from Google Identity Services
+    if (credential && typeof credential === "string") {
+      try {
+        const parts = credential.split(".");
+        if (parts.length === 3) {
+          const payloadBase64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+          const decodedJson = Buffer.from(payloadBase64, "base64").toString("utf8");
+          const googleData = JSON.parse(decodedJson);
+          if (googleData.email) extractedEmail = googleData.email;
+          if (googleData.name) extractedName = googleData.name;
+          if (googleData.sub) extractedSub = googleData.sub;
+          if (googleData.picture) extractedPic = googleData.picture;
+        }
+      } catch (jwtErr) {
+        console.warn("[Google Auth] Notice on decoding credential:", jwtErr.message);
+      }
+    }
+
+    if (!extractedEmail || !validateEmail(extractedEmail)) {
+      return res.status(400).json({
+        success: false,
+        error: "Valid Google email address is required for Google Sign-In."
+      });
+    }
+
+    const cleanEmail = extractedEmail.trim().toLowerCase();
+    const cleanName = extractedName && extractedName.trim() ? extractedName.trim() : cleanEmail.split("@")[0];
+    const isMongoReady = mongoose.connection.readyState === 1;
+
+    // 1. Look up returning customer by Google email or Google Sub ID across SQLite and MongoDB Atlas
+    let user = await db.get("SELECT * FROM users WHERE LOWER(email) = $1", [cleanEmail]);
+    if (!user && extractedSub) {
+      user = await db.get("SELECT * FROM users WHERE google_id = $1", [extractedSub]);
+    }
+
+    if (!user && isMongoReady) {
+      try {
+        const mongoOr = [{ email: cleanEmail }];
+        if (extractedSub) mongoOr.push({ google_id: extractedSub });
+        const mUser = await User.findOne({ $or: mongoOr }).lean();
+        if (mUser) {
+          user = {
+            id: mUser.id,
+            name: mUser.name,
+            phone: mUser.phone,
+            email: mUser.email,
+            role: mUser.role || "customer",
+            google_id: mUser.google_id
+          };
+          try {
+            await db.run(
+              `INSERT OR REPLACE INTO users (id, name, phone, email, role, google_id)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [user.id, user.name, user.phone, user.email, user.role, user.google_id]
+            );
+          } catch (_) {}
+        }
+      } catch (mErr) {
+        console.warn("[Google Auth] Atlas lookup notice:", mErr.message);
+      }
+    }
+
+    // RETURNING CUSTOMER: Sign in directly without duplicate account creation
+    if (user) {
+      if (extractedSub && user.google_id !== extractedSub) {
+        user.google_id = extractedSub;
+        try {
+          await db.run("UPDATE users SET google_id = $1 WHERE id = $2", [extractedSub, user.id]);
+        } catch (_) {}
+      }
+
+      // If user had no phone recorded, but one was submitted, update it
+      if ((!user.phone || user.phone.length < 10) && phone) {
+        const validated = validateIndianPhone(phone);
+        if (validated) {
+          user.phone = validated;
+          try {
+            await db.run("UPDATE users SET phone = $1 WHERE id = $2", [validated, user.id]);
+          } catch (_) {}
+        }
+      }
+
+      await syncUserToMongo(user, {
+        google_id: user.google_id || extractedSub,
+        google_picture: extractedPic || null,
+        last_login: new Date()
+      });
+      await linkGuestOrdersToMongo(user.id, user.phone, user.email);
+
+      const token = generateToken({ id: user.id, role: user.role });
+      setAuthCookie(res, token);
+
+      console.log(`[GOOGLE AUTH] Returning customer signed in: ${user.name} (${user.email})`);
+
+      return res.json({
+        success: true,
+        isNewUser: false,
+        message: `Welcome back, ${user.name}! Sign-in successful.`,
+        token,
+        user: {
+          id: user.id,
+          name: user.name,
+          phone: user.phone,
+          email: user.email,
+          role: user.role
+        }
+      });
+    }
+
+    // 2. NEW CUSTOMER: 10-digit Indian mobile number is required
+    const cleanPhone = phone ? validateIndianPhone(phone) : null;
+    if (!cleanPhone) {
+      return res.json({
+        success: false,
+        requiresPhone: true,
+        email: cleanEmail,
+        name: cleanName,
+        googleId: extractedSub,
+        picture: extractedPic,
+        message: "New Customer Registration: Please provide your 10-digit mobile number."
+      });
+    }
+
+    // Check if customer already exists by phone to prevent duplicate accounts
+    let existingByPhone = await db.get("SELECT * FROM users WHERE phone = $1", [cleanPhone]);
+    if (!existingByPhone && isMongoReady) {
+      try {
+        existingByPhone = await User.findOne({ phone: cleanPhone }).lean();
+      } catch (_) {}
+    }
+
+    if (existingByPhone) {
+      // Existing phone number found: Link Google credentials to existing customer account
+      try {
+        await db.run(
+          "UPDATE users SET email = $1, google_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
+          [cleanEmail, extractedSub || null, existingByPhone.id]
+        );
+      } catch (_) {}
+      existingByPhone.email = cleanEmail;
+      existingByPhone.google_id = extractedSub || null;
+
+      await syncUserToMongo(existingByPhone, {
+        google_id: extractedSub || null,
+        google_picture: extractedPic || null,
+        last_login: new Date()
+      });
+      await linkGuestOrdersToMongo(existingByPhone.id, cleanPhone, cleanEmail);
+
+      const token = generateToken({ id: existingByPhone.id, role: existingByPhone.role });
+      setAuthCookie(res, token);
+
+      console.log(`[GOOGLE AUTH] Existing customer linked via mobile: ${existingByPhone.name} (+91 ${cleanPhone})`);
+
+      return res.json({
+        success: true,
+        isNewUser: false,
+        message: `Welcome back, ${existingByPhone.name}! Your Google account has been linked.`,
+        token,
+        user: {
+          id: existingByPhone.id,
+          name: existingByPhone.name,
+          phone: existingByPhone.phone,
+          email: existingByPhone.email,
+          role: existingByPhone.role
+        }
+      });
+    }
+
+    // Brand New Customer: Insert and save in MongoDB Atlas
+    let nextId = Date.now();
+    try {
+      if (isMongoReady) {
+        const lastUser = await User.findOne().sort({ id: -1 }).lean().catch(() => null);
+        if (lastUser && lastUser.id && !isNaN(lastUser.id)) {
+          nextId = Math.max(lastUser.id + 1, nextId);
+        }
+      }
+    } catch (_) {}
+
+    const result = await db.run(
+      `INSERT INTO users (name, phone, email, role, google_id)
+       VALUES ($1, $2, $3, 'customer', $4)`,
+      [cleanName, cleanPhone, cleanEmail, extractedSub || null]
+    );
+
+    const insertedId = result.lastInsertRowid || nextId;
+    let newUser = await db.get("SELECT * FROM users WHERE id = $1", [insertedId]);
+    if (!newUser) {
+      newUser = {
+        id: insertedId,
+        name: cleanName,
+        phone: cleanPhone,
+        email: cleanEmail,
+        role: "customer",
+        google_id: extractedSub || null
+      };
+    }
+
+    try {
+      await db.run("INSERT INTO customer_profiles (user_id) VALUES ($1)", [newUser.id]);
+    } catch (_) {}
+
+    // Save in MongoDB Atlas
+    await syncUserToMongo(newUser, {
+      google_id: extractedSub || null,
+      google_picture: extractedPic || null,
+      last_login: new Date()
+    });
+    await linkGuestOrdersToMongo(newUser.id, cleanPhone, cleanEmail);
+
+    const token = generateToken({ id: newUser.id, role: newUser.role });
+    setAuthCookie(res, token);
+
+    console.log(`[GOOGLE AUTH] New Customer Registered in MongoDB Atlas: ${newUser.name} (+91 ${cleanPhone}, ${cleanEmail})`);
+
+    return res.status(201).json({
+      success: true,
+      isNewUser: true,
+      message: `Welcome to Ojaswi Foods, ${newUser.name}! Your account has been registered.`,
+      token,
+      user: {
+        id: newUser.id,
+        name: newUser.name,
+        phone: newUser.phone,
+        email: newUser.email,
+        role: newUser.role
       }
     });
   } catch (err) {

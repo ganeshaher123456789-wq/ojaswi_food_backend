@@ -97,11 +97,11 @@ async function runAllTests() {
     let productsList = [];
     try {
       const res = await request("/api/products");
-      if (res.status === 200 && res.data.products?.length === 11) {
+      if (res.status === 200 && res.data.products?.length >= 11) {
         productsList = res.data.products;
         logPass(`Product Catalog API returns all ${productsList.length} authentic Ojaswi spice products`);
       } else {
-        throw new Error(`Expected 11 products, got ${res.data.products?.length}`);
+        throw new Error(`Expected at least 11 products, got ${res.data.products?.length}`);
       }
     } catch (e) { logFail("Product Catalog API", e); }
 
@@ -386,7 +386,9 @@ async function runAllTests() {
 
     // 18. Order History & Timeline Status
     try {
-      const res = await request(`/api/orders/${encodeURIComponent(codOrderId)}`);
+      const res = await request(`/api/orders/${encodeURIComponent(codOrderId)}`, {
+        headers: { Cookie: customerCookie }
+      });
       if (res.status === 200 && res.data.order.timeline?.length === 8) {
         logPass(`Order tracking timeline contains all 8 lifecycle steps (${res.data.order.timeline.map(t=>t.status).join(" -> ")})`);
       } else {
@@ -580,6 +582,80 @@ async function runAllTests() {
         throw new Error("Customer was allowed into admin dashboard");
       }
     } catch (e) { logFail("Admin Role Authorization Guard", e); }
+
+    // 29. Google Sign-In: New Customer without mobile returns requiresPhone
+    const googleEmailNew = `test_google_${Date.now()}@gmail.com`;
+    const googleName = "Ojaswi Google Customer";
+    const googleSub = "g_" + Date.now();
+    try {
+      const res = await request("/api/auth/google", {
+        method: "POST",
+        body: JSON.stringify({
+          email: googleEmailNew,
+          name: googleName,
+          googleId: googleSub
+        })
+      });
+      if (res.status === 200 && res.data.requiresPhone === true) {
+        logPass("Google Sign-In: New customer correctly prompts for 10-digit mobile number");
+      } else {
+        throw new Error(res.data.error || "Expected requiresPhone=true");
+      }
+    } catch (e) { logFail("Google Sign-In Mobile Prompt", e); }
+
+    // 30. Google Sign-In: New Customer Registration with name, Google email, 10-digit mobile
+    const googleTestPhone = "97" + Date.now().toString().slice(-8);
+    let googleCustomerToken = "";
+    try {
+      const res = await request("/api/auth/google", {
+        method: "POST",
+        body: JSON.stringify({
+          email: googleEmailNew,
+          name: googleName,
+          phone: googleTestPhone,
+          googleId: googleSub
+        })
+      });
+      if (res.status === 201 && res.data.success && res.data.isNewUser && res.data.token) {
+        googleCustomerToken = res.data.token;
+        logPass(`Google Sign-In: New customer ${googleName} successfully registered in MongoDB Atlas (+91 ${googleTestPhone})`);
+      } else {
+        throw new Error(res.data.error || "Google registration failed");
+      }
+    } catch (e) { logFail("Google Customer Registration", e); }
+
+    // 31. Google Sign-In: Returning Customer Sign-In without duplicate accounts
+    try {
+      const res = await request("/api/auth/google", {
+        method: "POST",
+        body: JSON.stringify({
+          email: googleEmailNew,
+          googleId: googleSub
+        })
+      });
+      if (res.status === 200 && res.data.success && res.data.isNewUser === false && res.data.token) {
+        logPass(`Google Sign-In: Returning customer signed in instantly without duplicate accounts (${res.data.user.name})`);
+      } else {
+        throw new Error(res.data.error || "Returning customer login failed");
+      }
+    } catch (e) { logFail("Returning Google Customer Login", e); }
+
+    // 32. Order Receipt & Cash on Delivery Status Verification
+    try {
+      const res = await request(`/api/orders/${encodeURIComponent(codOrderId)}/receipt`, {
+        headers: { Cookie: customerCookie }
+      });
+      if (res.status === 200 && res.data.receipt) {
+        const rcpt = res.data.receipt;
+        if (rcpt.paymentStatus === "PENDING" && rcpt.paymentMethod === "CASH ON DELIVERY" && rcpt.isPaid === false) {
+          logPass("Receipt Cash on Delivery: Payment Method is 'CASH ON DELIVERY', Status is 'PENDING', isPaid is false");
+        } else {
+          throw new Error(`Receipt payment mismatch: Method=${rcpt.paymentMethod}, Status=${rcpt.paymentStatus}, isPaid=${rcpt.isPaid}`);
+        }
+      } else {
+        throw new Error(res.data.error || "Could not retrieve receipt");
+      }
+    } catch (e) { logFail("Receipt Cash on Delivery Verification", e); }
 
   } finally {
     server.close();

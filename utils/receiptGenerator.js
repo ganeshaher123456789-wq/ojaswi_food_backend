@@ -128,8 +128,8 @@ export function generateReceiptData(order) {
     },
     invoiceDate: `${dateStr} at ${timeStr}`,
     orderStatus: order.order_status || "Confirmed",
-    paymentStatus: order.payment_status || "Pending",
-    paymentMethod: order.payment_method || "Cash on Delivery",
+    paymentStatus: order.payment_status === "Paid" ? "PAID" : "PENDING",
+    paymentMethod: ((order.payment_method || "").toLowerCase().includes("cash on delivery") || (order.payment_method || "").toLowerCase().includes("cod")) ? "CASH ON DELIVERY" : (order.payment_method || "CASH ON DELIVERY"),
     isPaid: order.payment_status === "Paid",
     seller: {
       name: "Ojaswi Foods",
@@ -295,8 +295,11 @@ export function renderReceiptHtml(receipt) {
         <div style="font-size: 12px; color: #6b7280;">Date: ${receipt.invoiceDate}</div>
         <div style="margin-top: 8px;">
           <span class="badge ${receipt.isPaid ? 'badge-paid' : 'badge-pending'}">
-            ${receipt.paymentMethod} • ${receipt.paymentStatus}
+            Payment Method: ${receipt.paymentMethod} • Payment Status: ${receipt.paymentStatus}
           </span>
+          <div style="font-size: 13px; font-weight: 700; color: ${receipt.isPaid ? '#15803d' : '#b45309'}; margin-top: 6px;">
+            Amount Payable: ₹${receipt.pricing.totalAmount.toFixed(2)} ${receipt.isPaid ? '(PAID)' : '(COLLECT ON DELIVERY)'}
+          </div>
         </div>
       </div>
     </div>

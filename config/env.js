@@ -34,6 +34,9 @@ export const ENV = {
   // Frontend URL (for CORS and redirects)
   FRONTEND_URL: process.env.FRONTEND_URL || "",
   
+  // Google OAuth Client ID
+  GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID || "",
+
   // Secrets
   JWT_SECRET: process.env.JWT_SECRET || "ojaswi-super-secret-jwt-key-2026-production-ready",
   SESSION_SECRET: process.env.SESSION_SECRET || "ojaswi-session-secret-salt-malegaon",

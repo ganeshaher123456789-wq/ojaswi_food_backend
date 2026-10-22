@@ -6,6 +6,8 @@ const userSchema = new mongoose.Schema(
     phone: { type: String, trim: true, index: true },
     email: { type: String, trim: true, lowercase: true, index: true },
     name: { type: String, trim: true, required: true },
+    google_id: { type: String, trim: true, index: true },
+    google_picture: { type: String, trim: true },
     password_hash: { type: String },
     role: { type: String, default: "customer", enum: ["customer", "admin"], index: true },
     delivery_address: {
