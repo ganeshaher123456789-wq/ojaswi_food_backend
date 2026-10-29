@@ -41,6 +41,13 @@ const orderSchema = new mongoose.Schema(
       default: "Pending", 
       index: true 
     },
+    confirmation_status: { 
+      type: String, 
+      default: "Awaiting Confirmation", 
+      index: true 
+    },
+    preferred_channel: { type: String, trim: true },
+    confirmed_at: { type: Date },
     delivery_address: { type: mongoose.Schema.Types.Mixed },
     delivery_address_json: { type: String },
     items: [orderItemSchema],

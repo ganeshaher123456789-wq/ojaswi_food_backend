@@ -75,6 +75,9 @@ class DatabaseAdapter {
         safeAddCol("orders", "delivery_spot TEXT");
         safeAddCol("orders", "dispatched_at TIMESTAMP");
         safeAddCol("orders", "delivered_at TIMESTAMP");
+        safeAddCol("orders", "confirmation_status TEXT DEFAULT 'Awaiting Confirmation'");
+        safeAddCol("orders", "preferred_channel TEXT");
+        safeAddCol("orders", "confirmed_at TIMESTAMP");
         safeAddCol("order_items", "product_image TEXT");
         safeAddCol("order_items", "product_location TEXT");
         safeAddCol("order_items", "sku TEXT");

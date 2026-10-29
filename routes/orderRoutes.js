@@ -219,34 +219,102 @@ router.post("/", async (req, res, next) => {
       }
     } catch (_) { }
 
-    // Unique Order ID generation
+    // Unique Order ID resolution & duplicate prevention
     let orderId = (req.body.orderId && typeof req.body.orderId === "string" && req.body.orderId.trim().length >= 4)
       ? (req.body.orderId.trim().startsWith("#") ? req.body.orderId.trim() : `#${req.body.orderId.trim()}`)
       : generateOrderId();
 
-    // Verify orderId uniqueness
+    // Check if an order with this orderId already exists (prevent duplicate orders on re-clicks or channel switches)
+    let existingOrder = null;
     try {
-      const existing = await db.get("SELECT id FROM orders WHERE id = $1", [orderId]);
-      if (existing) {
-        orderId = generateOrderId();
+      existingOrder = await db.get("SELECT * FROM orders WHERE id = $1", [orderId]);
+      if (!existingOrder && mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+        existingOrder = await Order.findOne({ id: orderId }).lean();
       }
     } catch (_) { }
 
     const isCOD = !payment_method ||
       payment_method.toLowerCase().includes("cash on delivery") ||
       payment_method.toLowerCase().includes("cod");
-    const paymentStatus = isCOD ? OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING : "Created";
-    const orderStatus = isCOD ? "Confirmed" : "Pending";
+    const paymentStatus = isCOD ? "CASH ON DELIVERY — PAYMENT PENDING" : "Created";
+    const orderStatus = req.body.confirmed ? "Confirmed (Pending Dispatch)" : "Awaiting Confirmation";
+    const confirmationStatus = req.body.confirmed ? "Confirmed by Customer" : "Awaiting Customer Message / Confirmation";
+    const preferredChannel = req.body.preferred_channel || "whatsapp";
 
     // Associate order with verified authenticated customer ID (strictly isolate by req.user.id)
     const userId = req.user ? req.user.id : null;
-
     const addressJson = JSON.stringify(cleanAddress);
 
-    // 4. Save Order in SQL Database
+    if (existingOrder) {
+      // Update existing order safely without creating duplicates
+      try {
+        await db.run(
+          `UPDATE orders 
+           SET customer_name = $1, customer_phone = $2, customer_email = $3, subtotal = $4, 
+               total_amount = $5, payment_method = $6, payment_status = $7, order_status = $8, 
+               confirmation_status = $9, preferred_channel = $10, delivery_address_json = $11, notes = $12
+           WHERE id = $13`,
+          [
+            finalCustomerName,
+            cleanPhone,
+            finalCustomerEmail,
+            subtotal,
+            totalAmount,
+            isCOD ? OJASWI_CONSTANTS.PAYMENT_METHODS.COD : OJASWI_CONSTANTS.PAYMENT_METHODS.ONLINE,
+            paymentStatus,
+            orderStatus,
+            confirmationStatus,
+            preferredChannel,
+            addressJson,
+            notes || null,
+            orderId
+          ]
+        );
+      } catch (_) { }
+
+      if (mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+        try {
+          await Order.findOneAndUpdate(
+            { id: orderId },
+            {
+              $set: {
+                customer_name: finalCustomerName,
+                customer_phone: cleanPhone,
+                customer_email: finalCustomerEmail,
+                subtotal,
+                total_amount: totalAmount,
+                payment_method: isCOD ? OJASWI_CONSTANTS.PAYMENT_METHODS.COD : OJASWI_CONSTANTS.PAYMENT_METHODS.ONLINE,
+                payment_status: paymentStatus,
+                order_status: orderStatus,
+                confirmation_status: confirmationStatus,
+                preferred_channel: preferredChannel,
+                delivery_address: cleanAddress,
+                delivery_address_json: addressJson,
+                items: orderItems,
+                notes: notes || null,
+                updated_at: new Date()
+              }
+            }
+          );
+        } catch (_) { }
+      }
+
+      return res.json({
+        success: true,
+        message: "Order updated safely.",
+        orderId: orderId,
+        order_status: orderStatus,
+        confirmation_status: confirmationStatus,
+        payment_status: paymentStatus,
+        items: orderItems,
+        isExisting: true
+      });
+    }
+
+    // 4. Save New Order in SQL Database
     await db.run(
-      `INSERT INTO orders (id, user_id, customer_name, customer_phone, customer_email, subtotal, delivery_charge, discount_amount, total_amount, payment_method, payment_status, order_status, delivery_address_json, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11, $12, $13)`,
+      `INSERT INTO orders (id, user_id, customer_name, customer_phone, customer_email, subtotal, delivery_charge, discount_amount, total_amount, payment_method, payment_status, order_status, confirmation_status, preferred_channel, delivery_address_json, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9, $10, $11, $12, $13, $14, $15)`,
       [
         orderId,
         userId,
@@ -259,6 +327,8 @@ router.post("/", async (req, res, next) => {
         isCOD ? OJASWI_CONSTANTS.PAYMENT_METHODS.COD : OJASWI_CONSTANTS.PAYMENT_METHODS.ONLINE,
         paymentStatus,
         orderStatus,
+        confirmationStatus,
+        preferredChannel,
         addressJson,
         notes || null
       ]
@@ -308,6 +378,8 @@ router.post("/", async (req, res, next) => {
             payment_method: isCOD ? OJASWI_CONSTANTS.PAYMENT_METHODS.COD : OJASWI_CONSTANTS.PAYMENT_METHODS.ONLINE,
             payment_status: paymentStatus,
             order_status: orderStatus,
+            confirmation_status: confirmationStatus,
+            preferred_channel: preferredChannel,
             delivery_address: cleanAddress,
             delivery_address_json: addressJson,
             items: orderItems,
@@ -390,8 +462,13 @@ router.post("/", async (req, res, next) => {
         orderId,
         order: {
           ...createdOrder,
-          payment_status: OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING
+          order_status: orderStatus,
+          confirmation_status: confirmationStatus,
+          payment_status: "CASH ON DELIVERY — PAYMENT PENDING"
         },
+        order_status: orderStatus,
+        confirmation_status: confirmationStatus,
+        payment_status: "CASH ON DELIVERY — PAYMENT PENDING",
         items: orderItems,
         requiresOnlinePayment: false,
         notificationStatuses
@@ -429,6 +506,93 @@ router.post("/", async (req, res, next) => {
       items: orderItems,
       requiresOnlinePayment: true,
       razorpayOrder
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * POST /api/orders/:id/confirm
+ * Customer explicitly confirms having submitted order message via WhatsApp, Gmail, or SMS
+ */
+router.post("/:id/confirm", async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { channel } = req.body;
+    const rawId = decodeURIComponent(id).trim();
+    const withHash = rawId.startsWith("#") ? rawId : `#${rawId}`;
+    const withoutHash = rawId.startsWith("#") ? rawId.slice(1) : rawId;
+
+    let order = await db.get(
+      "SELECT * FROM orders WHERE id = $1 OR id = $2 OR id = $3",
+      [rawId, withHash, withoutHash]
+    );
+
+    if (!order && mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+      try {
+        order = await Order.findOne({
+          $or: [{ id: rawId }, { id: withHash }, { id: withoutHash }]
+        }).lean();
+      } catch (_) {}
+    }
+
+    if (!order) {
+      return res.status(404).json({ success: false, error: `Order ${rawId} was not found.` });
+    }
+
+    // Customer authorization check if order is linked to a user
+    if (order.user_id && req.user && req.user.id && req.user.role !== "admin") {
+      if (String(order.user_id) !== String(req.user.id)) {
+        return res.status(403).json({ success: false, error: "Access denied." });
+      }
+    }
+
+    const now = new Date();
+    const updatedOrderStatus = "Confirmed (Pending Dispatch)";
+    const updatedConfStatus = "Confirmed by Customer";
+    const prefChannel = channel || order.preferred_channel || "whatsapp";
+    const paymentStatus = "CASH ON DELIVERY — PAYMENT PENDING";
+
+    // Update in SQLite
+    try {
+      await db.run(
+        `UPDATE orders 
+         SET order_status = $1, confirmation_status = $2, confirmed_at = $3, preferred_channel = $4, payment_status = $5
+         WHERE id = $6`,
+        [updatedOrderStatus, updatedConfStatus, now.toISOString(), prefChannel, paymentStatus, order.id]
+      );
+    } catch (_) {}
+
+    // Update in MongoDB Atlas
+    if (mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+      try {
+        await Order.findOneAndUpdate(
+          { id: order.id },
+          {
+            $set: {
+              order_status: updatedOrderStatus,
+              confirmation_status: updatedConfStatus,
+              confirmed_at: now,
+              preferred_channel: prefChannel,
+              payment_status: paymentStatus,
+              updated_at: now
+            }
+          }
+        );
+      } catch (mErr) {
+        console.warn("[MongoDB] Order confirm notice:", mErr.message);
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: "Order successfully confirmed! Dispatch preparation started.",
+      orderId: order.id,
+      order_status: updatedOrderStatus,
+      confirmation_status: updatedConfStatus,
+      payment_status: paymentStatus,
+      preferred_channel: prefChannel
     });
   } catch (err) {
     next(err);
