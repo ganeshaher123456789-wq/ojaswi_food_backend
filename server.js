@@ -37,11 +37,13 @@ const defaultAllowedOrigins = [
   "http://localhost:5000",
   "http://localhost:5173",
   "http://localhost:5500",
+  "http://localhost:5512",
   "http://localhost:8080",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:5000",
   "http://127.0.0.1:5173",
   "http://127.0.0.1:5500",
+  "http://127.0.0.1:5512",
   "http://127.0.0.1:8080"
 ];
 
@@ -207,13 +209,12 @@ async function startServer() {
   try {
     await seedDatabase();
 
-    // Connect to MongoDB Atlas and synchronize collections
-    try {
-      await connectMongo();
-      await syncMongoAtlas();
-    } catch (mongoErr) {
-      console.warn("[MongoDB] Startup sync notice:", mongoErr.message);
-    }
+    // Connect to MongoDB Atlas and synchronize collections asynchronously so server binds immediately
+    connectMongo()
+      .then(() => syncMongoAtlas())
+      .catch((mongoErr) => {
+        console.warn("[MongoDB] Startup sync notice:", mongoErr.message);
+      });
 
     const host = process.env.NODE_ENV === "production" ? "0.0.0.0" : undefined;
     const mongoStatus = getMongoStatus();

@@ -21,14 +21,74 @@ function getCartIdentifier(req) {
   return { session_id: sessionId };
 }
 
+async function getCartFromSqlite(filter) {
+  try {
+    let row = null;
+    if (filter.user_id) {
+      row = await db.get("SELECT * FROM carts WHERE user_id = $1", [filter.user_id]);
+    } else if (filter.session_id) {
+      row = await db.get("SELECT * FROM carts WHERE session_id = $1", [filter.session_id]);
+    }
+    if (row && row.items_json) {
+      const items = JSON.parse(row.items_json);
+      return {
+        items,
+        subtotal: row.subtotal || 0,
+        total_items: row.total_items || 0
+      };
+    }
+  } catch (_) { }
+  return null;
+}
+
+async function saveCartToSqlite(filter, cartData) {
+  try {
+    const itemsJson = JSON.stringify(cartData.items || []);
+    const subtotal = Number(cartData.subtotal) || 0;
+    const totalItems = Number(cartData.total_items) || 0;
+    if (filter.user_id) {
+      await db.run(
+        `INSERT INTO carts (user_id, session_id, items_json, subtotal, total_items, updated_at)
+         VALUES ($1, NULL, $2, $3, $4, datetime('now'))
+         ON CONFLICT(user_id) DO UPDATE SET
+           items_json = excluded.items_json,
+           subtotal = excluded.subtotal,
+           total_items = excluded.total_items,
+           updated_at = datetime('now')`,
+        [filter.user_id, itemsJson, subtotal, totalItems]
+      );
+    } else if (filter.session_id) {
+      await db.run(
+        `INSERT INTO carts (user_id, session_id, items_json, subtotal, total_items, updated_at)
+         VALUES (NULL, $1, $2, $3, $4, datetime('now'))
+         ON CONFLICT(session_id) DO UPDATE SET
+           items_json = excluded.items_json,
+           subtotal = excluded.subtotal,
+           total_items = excluded.total_items,
+           updated_at = datetime('now')`,
+        [filter.session_id, itemsJson, subtotal, totalItems]
+      );
+    }
+  } catch (_) { }
+}
+
 /**
  * GET /api/cart
- * Retrieve current customer's or guest's cart from MongoDB Atlas
+ * Retrieve current customer's or guest's cart from MongoDB Atlas / SQLite
  */
 router.get("/", async (req, res, next) => {
   try {
     const filter = getCartIdentifier(req);
-    let cart = await Cart.findOne(filter).lean();
+    let cart = null;
+    try {
+      if (Cart) {
+        cart = await Cart.findOne(filter).lean();
+      }
+    } catch (_) { }
+
+    if (!cart) {
+      cart = await getCartFromSqlite(filter);
+    }
 
     if (!cart) {
       cart = {
@@ -56,7 +116,7 @@ router.get("/", async (req, res, next) => {
 
 /**
  * POST /api/cart
- * Add or increment item in MongoDB Atlas cart
+ * Add or increment item in cart
  */
 router.post("/", async (req, res, next) => {
   try {
@@ -68,10 +128,15 @@ router.post("/", async (req, res, next) => {
       return res.status(400).json({ success: false, error: "Valid productId is required." });
     }
 
-    // Validate product existence and live stock from MongoDB Atlas
-    let product = await Product.findOne({ id: prodId, is_active: 1 }).lean();
+    // Validate product existence and live stock
+    let product = null;
+    try {
+      if (Product) {
+        product = await Product.findOne({ id: prodId, is_active: 1 }).lean();
+      }
+    } catch (_) { }
+
     if (!product) {
-      // Fallback check in local db if needed
       product = await db.get("SELECT * FROM products WHERE id = $1 AND is_active = 1", [prodId]);
     }
 
@@ -87,18 +152,35 @@ router.post("/", async (req, res, next) => {
     }
 
     const filter = getCartIdentifier(req);
-    let cart = await Cart.findOne(filter);
+    let cart = null;
+    try {
+      if (Cart) {
+        cart = await Cart.findOne(filter);
+      }
+    } catch (_) { }
 
     if (!cart) {
-      cart = new Cart({
+      const sqliteCart = await getCartFromSqlite(filter);
+      cart = {
         ...filter,
-        items: [],
-        subtotal: 0,
-        total_items: 0
-      });
+        items: sqliteCart ? sqliteCart.items : [],
+        subtotal: sqliteCart ? sqliteCart.subtotal : 0,
+        total_items: sqliteCart ? sqliteCart.total_items : 0,
+        save: async function () {
+          try {
+            if (Cart) {
+              await Cart.findOneAndUpdate(
+                filter,
+                { $set: { items: this.items, subtotal: this.subtotal, total_items: this.total_items } },
+                { upsert: true, new: true }
+              );
+            }
+          } catch (_) { }
+        }
+      };
     }
 
-    const existingIndex = cart.items.findIndex((it) => it.product_id === prodId);
+    const existingIndex = cart.items.findIndex((it) => (it.product_id || it.id) === prodId);
     const sellingPrice = product.selling_price || product.price;
 
     if (existingIndex > -1) {
@@ -106,7 +188,9 @@ router.post("/", async (req, res, next) => {
     } else {
       cart.items.push({
         product_id: prodId,
+        id: prodId,
         product_name: product.name,
+        name: product.name,
         selling_price: sellingPrice,
         price: product.price,
         weight: product.weight || "NET WEIGHT 500g",
@@ -118,9 +202,12 @@ router.post("/", async (req, res, next) => {
 
     // Recalculate totals
     cart.total_items = cart.items.reduce((acc, it) => acc + (it.quantity || 1), 0);
-    cart.subtotal = cart.items.reduce((acc, it) => acc + it.selling_price * (it.quantity || 1), 0);
+    cart.subtotal = cart.items.reduce((acc, it) => acc + (it.selling_price || it.price) * (it.quantity || 1), 0);
 
-    await cart.save();
+    if (typeof cart.save === "function") {
+      await cart.save();
+    }
+    await saveCartToSqlite(filter, cart);
 
     res.json({
       success: true,
@@ -138,7 +225,7 @@ router.post("/", async (req, res, next) => {
 
 /**
  * PUT /api/cart
- * Update quantity of a product in MongoDB Atlas cart
+ * Update quantity of a product in cart
  */
 router.put("/", async (req, res, next) => {
   try {
@@ -151,25 +238,56 @@ router.put("/", async (req, res, next) => {
     }
 
     const filter = getCartIdentifier(req);
-    let cart = await Cart.findOne(filter);
+    let cart = null;
+    try {
+      if (Cart) {
+        cart = await Cart.findOne(filter);
+      }
+    } catch (_) { }
+
+    if (!cart) {
+      const sqliteCart = await getCartFromSqlite(filter);
+      if (sqliteCart) {
+        cart = {
+          ...filter,
+          items: sqliteCart.items,
+          subtotal: sqliteCart.subtotal,
+          total_items: sqliteCart.total_items,
+          save: async function () {
+            try {
+              if (Cart) {
+                await Cart.findOneAndUpdate(
+                  filter,
+                  { $set: { items: this.items, subtotal: this.subtotal, total_items: this.total_items } },
+                  { upsert: true, new: true }
+                );
+              }
+            } catch (_) { }
+          }
+        };
+      }
+    }
 
     if (!cart) {
       return res.status(404).json({ success: false, error: "Cart not found." });
     }
 
     if (qty <= 0) {
-      cart.items = cart.items.filter((it) => it.product_id !== prodId);
+      cart.items = cart.items.filter((it) => (it.product_id || it.id) !== prodId);
     } else {
-      const item = cart.items.find((it) => it.product_id === prodId);
+      const item = cart.items.find((it) => (it.product_id || it.id) === prodId);
       if (item) {
         item.quantity = Math.min(qty, 50);
       }
     }
 
     cart.total_items = cart.items.reduce((acc, it) => acc + (it.quantity || 1), 0);
-    cart.subtotal = cart.items.reduce((acc, it) => acc + it.selling_price * (it.quantity || 1), 0);
+    cart.subtotal = cart.items.reduce((acc, it) => acc + (it.selling_price || it.price) * (it.quantity || 1), 0);
 
-    await cart.save();
+    if (typeof cart.save === "function") {
+      await cart.save();
+    }
+    await saveCartToSqlite(filter, cart);
 
     res.json({
       success: true,
@@ -186,19 +304,50 @@ router.put("/", async (req, res, next) => {
 
 /**
  * DELETE /api/cart/:productId
- * Remove item from MongoDB Atlas cart
+ * Remove item from cart
  */
 router.delete("/:productId", async (req, res, next) => {
   try {
     const prodId = parseInt(req.params.productId, 10);
     const filter = getCartIdentifier(req);
-    let cart = await Cart.findOne(filter);
+    let cart = null;
+    try {
+      if (Cart) {
+        cart = await Cart.findOne(filter);
+      }
+    } catch (_) { }
+
+    if (!cart) {
+      const sqliteCart = await getCartFromSqlite(filter);
+      if (sqliteCart) {
+        cart = {
+          ...filter,
+          items: sqliteCart.items,
+          subtotal: sqliteCart.subtotal,
+          total_items: sqliteCart.total_items,
+          save: async function () {
+            try {
+              if (Cart) {
+                await Cart.findOneAndUpdate(
+                  filter,
+                  { $set: { items: this.items, subtotal: this.subtotal, total_items: this.total_items } },
+                  { upsert: true, new: true }
+                );
+              }
+            } catch (_) { }
+          }
+        };
+      }
+    }
 
     if (cart) {
-      cart.items = cart.items.filter((it) => it.product_id !== prodId);
+      cart.items = cart.items.filter((it) => (it.product_id || it.id) !== prodId);
       cart.total_items = cart.items.reduce((acc, it) => acc + (it.quantity || 1), 0);
-      cart.subtotal = cart.items.reduce((acc, it) => acc + it.selling_price * (it.quantity || 1), 0);
-      await cart.save();
+      cart.subtotal = cart.items.reduce((acc, it) => acc + (it.selling_price || it.price) * (it.quantity || 1), 0);
+      if (typeof cart.save === "function") {
+        await cart.save();
+      }
+      await saveCartToSqlite(filter, cart);
     }
 
     res.json({
@@ -213,12 +362,17 @@ router.delete("/:productId", async (req, res, next) => {
 
 /**
  * DELETE /api/cart
- * Empty cart in MongoDB Atlas
+ * Empty cart
  */
 router.delete("/", async (req, res, next) => {
   try {
     const filter = getCartIdentifier(req);
-    let cart = await Cart.findOne(filter);
+    let cart = null;
+    try {
+      if (Cart) {
+        cart = await Cart.findOne(filter);
+      }
+    } catch (_) { }
 
     if (cart) {
       cart.items = [];
@@ -226,6 +380,7 @@ router.delete("/", async (req, res, next) => {
       cart.total_items = 0;
       await cart.save();
     }
+    await saveCartToSqlite(filter, { items: [], subtotal: 0, total_items: 0 });
 
     res.json({
       success: true,
@@ -239,7 +394,7 @@ router.delete("/", async (req, res, next) => {
 
 /**
  * POST /api/cart/sync
- * Sync guest local items with MongoDB Atlas upon user login
+ * Sync items with cart
  */
 router.post("/sync", async (req, res, next) => {
   try {
@@ -249,27 +404,28 @@ router.post("/sync", async (req, res, next) => {
     }
 
     const filter = getCartIdentifier(req);
-    let cart = await Cart.findOne(filter);
-    if (!cart) {
-      cart = new Cart({
-        ...filter,
-        items: [],
-        subtotal: 0,
-        total_items: 0
-      });
-    }
-
     const syncedItems = [];
     for (const it of items) {
       const prodId = parseInt(it.id || it.productId || it.product_id, 10);
       const qty = Math.max(1, Math.min(50, parseInt(it.quantity, 10) || 1));
       if (!prodId) continue;
 
-      const prod = await Product.findOne({ id: prodId, is_active: 1 }).lean();
+      let prod = null;
+      try {
+        if (Product) {
+          prod = await Product.findOne({ id: prodId, is_active: 1 }).lean();
+        }
+      } catch (_) { }
+      if (!prod) {
+        prod = await db.get("SELECT * FROM products WHERE id = $1 AND is_active = 1", [prodId]);
+      }
+
       if (prod) {
         syncedItems.push({
           product_id: prodId,
+          id: prodId,
           product_name: prod.name,
+          name: prod.name,
           selling_price: prod.selling_price || prod.price,
           price: prod.price,
           weight: prod.weight || "NET WEIGHT 500g",
@@ -280,23 +436,26 @@ router.post("/sync", async (req, res, next) => {
       }
     }
 
-    cart.items = syncedItems;
-    cart.total_items = cart.items.reduce((acc, it) => acc + (it.quantity || 1), 0);
-    cart.subtotal = cart.items.reduce((acc, it) => acc + it.selling_price * (it.quantity || 1), 0);
+    const total_items = syncedItems.reduce((acc, it) => acc + (it.quantity || 1), 0);
+    const subtotal = syncedItems.reduce((acc, it) => acc + (it.selling_price || it.price) * (it.quantity || 1), 0);
 
-    await cart.save();
+    const cartData = { items: syncedItems, total_items, subtotal };
+
+    try {
+      if (Cart) {
+        await Cart.findOneAndUpdate(filter, { $set: cartData }, { upsert: true, new: true });
+      }
+    } catch (_) { }
+
+    await saveCartToSqlite(filter, cartData);
 
     res.json({
       success: true,
-      message: "Cart items synced with MongoDB Atlas.",
-      cart: {
-        items: cart.items,
-        subtotal: cart.subtotal,
-        total_items: cart.total_items
-      },
-      items: cart.items,
-      subtotal: cart.subtotal,
-      total_items: cart.total_items
+      message: "Cart items synced.",
+      cart: cartData,
+      items: syncedItems,
+      subtotal,
+      total_items
     });
   } catch (err) {
     next(err);

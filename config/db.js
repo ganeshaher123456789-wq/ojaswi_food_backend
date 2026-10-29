@@ -78,6 +78,19 @@ class DatabaseAdapter {
         safeAddCol("order_items", "product_image TEXT");
         safeAddCol("order_items", "product_location TEXT");
         safeAddCol("order_items", "sku TEXT");
+
+        // Ensure customer carts table exists
+        this.sqlite.exec(`
+          CREATE TABLE IF NOT EXISTS carts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER UNIQUE,
+            session_id TEXT UNIQUE,
+            items_json TEXT NOT NULL DEFAULT '[]',
+            subtotal REAL NOT NULL DEFAULT 0,
+            total_items INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
       } catch (err) {
         console.warn("[DB] Note on PRAGMA/migration settings:", err.message);
       }

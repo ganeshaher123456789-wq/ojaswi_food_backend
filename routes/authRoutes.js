@@ -15,7 +15,7 @@ const router = express.Router();
 
 async function syncUserToMongo(userData, extraFields = {}) {
   try {
-    if (!userData || (!userData.id && !userData.phone && !userData.email)) return;
+    if (!userData || (!userData.id && !userData.google_id && !userData.email)) return;
     if (mongoose.connection.readyState !== 1) return;
 
     // Calculate customer order count and total spent from MongoDB Atlas if available
@@ -31,7 +31,7 @@ async function syncUserToMongo(userData, extraFields = {}) {
           totalOrders = orderStats[0].count;
           totalSpent = orderStats[0].spent;
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     const setObj = {
@@ -66,13 +66,17 @@ async function syncUserToMongo(userData, extraFields = {}) {
       Object.assign(setObj, extraFields);
     }
 
-    const orConditions = [];
-    if (userData.phone) orConditions.push({ phone: userData.phone });
-    if (userData.email) orConditions.push({ email: userData.email });
-    if (userData.google_id) orConditions.push({ google_id: userData.google_id });
-    if (userData.id) orConditions.push({ id: userData.id });
-
-    const query = orConditions.length > 1 ? { $or: orConditions } : (orConditions[0] || { id: userData.id });
+    // Strictly match by unique user id or unique google_id or email, NEVER by phone alone
+    let query = null;
+    if (userData.id) {
+      query = { id: userData.id };
+    } else if (userData.google_id) {
+      query = { google_id: userData.google_id };
+    } else if (userData.email) {
+      query = { email: userData.email.toLowerCase() };
+    } else {
+      query = { phone: userData.phone };
+    }
 
     await User.findOneAndUpdate(query, { $set: setObj }, { upsert: true, returnDocument: "after" }).catch((err) => {
       console.warn("[MongoDB] User sync notice:", err.message);
@@ -85,20 +89,19 @@ async function syncUserToMongo(userData, extraFields = {}) {
 async function linkGuestOrdersToMongo(userId, phone, email) {
   try {
     if (mongoose.connection.readyState !== 1) return;
-    const conditions = [];
-    if (phone) conditions.push({ customer_phone: phone });
-    if (email) conditions.push({ customer_email: email });
-    if (conditions.length === 0) return;
+    if (!userId || !email) return;
 
-    await Order.updateMany(
-      {
-        $or: conditions,
-        $and: [
-          { $or: [{ user_id: { $exists: false } }, { user_id: null }, { user_id: 0 }] }
-        ]
-      },
-      { $set: { user_id: userId, updated_at: new Date() } }
-    ).catch((err) => console.warn("[MongoDB] Order link notice:", err.message));
+    // Only link orders matching the customer's verified email and phone to prevent cross-customer order hijacking
+    const query = {
+      customer_email: email.trim().toLowerCase(),
+      $or: [{ user_id: { $exists: false } }, { user_id: null }, { user_id: 0 }]
+    };
+    if (phone) {
+      query.customer_phone = phone;
+    }
+
+    await Order.updateMany(query, { $set: { user_id: userId, updated_at: new Date() } })
+      .catch((err) => console.warn("[MongoDB] Order link notice:", err.message));
 
     // Update customer's total orders count and total spent in MongoDB Atlas
     try {
@@ -110,9 +113,9 @@ async function linkGuestOrdersToMongo(userId, phone, email) {
         await User.findOneAndUpdate(
           { id: userId },
           { total_orders: orderStats[0].count, total_spent: orderStats[0].spent }
-        ).catch(() => {});
+        ).catch(() => { });
       }
-    } catch (_) {}
+    } catch (_) { }
   } catch (err) {
     console.warn("[MongoDB] Order link error:", err.message);
   }
@@ -213,7 +216,7 @@ router.post("/register", async (req, res, next) => {
           nextId = Math.max(lastUser.id + 1, nextId);
         }
       }
-    } catch (_) {}
+    } catch (_) { }
 
     // Insert new user into database
     const result = await db.run(
@@ -245,7 +248,7 @@ router.post("/register", async (req, res, next) => {
         `INSERT INTO customer_profiles (user_id) VALUES ($1)`,
         [user.id]
       );
-    } catch (_) {}
+    } catch (_) { }
 
     // Auto-link any previous guest orders matching this phone or email
     if (cleanPhone) {
@@ -384,7 +387,7 @@ router.post("/login", async (req, res, next) => {
                    VALUES ($1, $2, $3, $4, $5, $6)`,
                   [user.id, user.name, user.phone, user.email, user.password_hash, user.role]
                 );
-              } catch (_) {}
+              } catch (_) { }
             }
           }
         } catch (mErr) {
@@ -533,7 +536,7 @@ router.post("/reset-password", async (req, res, next) => {
                    VALUES ($1, $2, $3, $4, $5, $6)`,
                   [user.id, user.name, user.phone, user.email, user.password_hash, user.role]
                 );
-              } catch (_) {}
+              } catch (_) { }
             }
           }
         } catch (mErr) {
@@ -549,8 +552,8 @@ router.post("/reset-password", async (req, res, next) => {
       const defaultName = cleanEmail
         ? cleanEmail.split("@")[0]
         : cleanPhone
-        ? `Customer ${cleanPhone.slice(-4)}`
-        : "Valued Customer";
+          ? `Customer ${cleanPhone.slice(-4)}`
+          : "Valued Customer";
 
       const result = await db.run(
         `INSERT INTO users (name, phone, email, password_hash, role)
@@ -560,7 +563,7 @@ router.post("/reset-password", async (req, res, next) => {
       user = await db.get("SELECT * FROM users WHERE id = $1", [result.lastInsertRowid]);
       try {
         await db.run("INSERT INTO customer_profiles (user_id) VALUES ($1)", [user.id]);
-      } catch (_) {}
+      } catch (_) { }
     } else {
       await db.run(
         "UPDATE users SET password_hash = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2",
@@ -602,22 +605,35 @@ router.post("/reset-password", async (req, res, next) => {
 /**
  * 0d. Google Sign-In & Customer Registration
  * Handles Google OAuth login and registration.
- * - For returning customers: signs in without creating duplicate accounts and returns session.
- * - For new customers: requires 10-digit mobile number, verifies Indian format, and registers in MongoDB Atlas.
+ * - Each customer signs in with their own Google account.
+ * - Creates a separate, isolated customer profile using unique Google ID and email.
+ * - Strictly enforces customer isolation: never overwrites or merges other accounts.
  */
 router.post("/google", async (req, res, next) => {
   try {
-    const { credential, email, name, phone, googleId, picture } = req.body;
+    const {
+      credential,
+      token: bodyToken,
+      id_token,
+      email,
+      name,
+      phone,
+      googleId,
+      google_id,
+      sub,
+      picture
+    } = req.body;
 
     let extractedEmail = email;
     let extractedName = name;
-    let extractedSub = googleId;
+    let extractedSub = googleId || google_id || sub;
     let extractedPic = picture;
 
     // Decode Google ID Token (JWT) if passed from Google Identity Services
-    if (credential && typeof credential === "string") {
+    const rawToken = credential || bodyToken || id_token;
+    if (rawToken && typeof rawToken === "string") {
       try {
-        const parts = credential.split(".");
+        const parts = rawToken.split(".");
         if (parts.length === 3) {
           const payloadBase64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
           const decodedJson = Buffer.from(payloadBase64, "base64").toString("utf8");
@@ -641,18 +657,23 @@ router.post("/google", async (req, res, next) => {
 
     const cleanEmail = extractedEmail.trim().toLowerCase();
     const cleanName = extractedName && extractedName.trim() ? extractedName.trim() : cleanEmail.split("@")[0];
+    const cleanPhone = phone ? validateIndianPhone(phone) : null;
     const isMongoReady = mongoose.connection.readyState === 1;
 
-    // 1. Look up returning customer by Google email or Google Sub ID across SQLite and MongoDB Atlas
-    let user = await db.get("SELECT * FROM users WHERE LOWER(email) = $1", [cleanEmail]);
-    if (!user && extractedSub) {
+    // 1. Look up returning customer STRICTLY by Google Sub ID or unique Google email
+    let user = null;
+    if (extractedSub) {
       user = await db.get("SELECT * FROM users WHERE google_id = $1", [extractedSub]);
+    }
+    if (!user) {
+      user = await db.get("SELECT * FROM users WHERE LOWER(email) = $1", [cleanEmail]);
     }
 
     if (!user && isMongoReady) {
       try {
-        const mongoOr = [{ email: cleanEmail }];
+        const mongoOr = [];
         if (extractedSub) mongoOr.push({ google_id: extractedSub });
+        mongoOr.push({ email: cleanEmail });
         const mUser = await User.findOne({ $or: mongoOr }).lean();
         if (mUser) {
           user = {
@@ -669,31 +690,34 @@ router.post("/google", async (req, res, next) => {
                VALUES ($1, $2, $3, $4, $5, $6)`,
               [user.id, user.name, user.phone, user.email, user.role, user.google_id]
             );
-          } catch (_) {}
+          } catch (_) { }
         }
       } catch (mErr) {
         console.warn("[Google Auth] Atlas lookup notice:", mErr.message);
       }
     }
 
-    // RETURNING CUSTOMER: Sign in directly without duplicate account creation
+    // RETURNING CUSTOMER: Sign in directly to their own account without mixing or duplicate accounts
     if (user) {
       if (extractedSub && user.google_id !== extractedSub) {
         user.google_id = extractedSub;
         try {
-          await db.run("UPDATE users SET google_id = $1 WHERE id = $2", [extractedSub, user.id]);
-        } catch (_) {}
+          await db.run("UPDATE users SET google_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", [extractedSub, user.id]);
+        } catch (_) { }
       }
 
-      // If user had no phone recorded, but one was submitted, update it
-      if ((!user.phone || user.phone.length < 10) && phone) {
-        const validated = validateIndianPhone(phone);
-        if (validated) {
-          user.phone = validated;
-          try {
-            await db.run("UPDATE users SET phone = $1 WHERE id = $2", [validated, user.id]);
-          } catch (_) {}
-        }
+      if (cleanName && (!user.name || user.name === "Customer")) {
+        user.name = cleanName;
+        try {
+          await db.run("UPDATE users SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", [cleanName, user.id]);
+        } catch (_) { }
+      }
+
+      if (cleanPhone && (!user.phone || user.phone.length < 10)) {
+        user.phone = cleanPhone;
+        try {
+          await db.run("UPDATE users SET phone = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", [cleanPhone, user.id]);
+        } catch (_) { }
       }
 
       await syncUserToMongo(user, {
@@ -706,7 +730,7 @@ router.post("/google", async (req, res, next) => {
       const token = generateToken({ id: user.id, role: user.role });
       setAuthCookie(res, token);
 
-      console.log(`[GOOGLE AUTH] Returning customer signed in: ${user.name} (${user.email})`);
+      console.log(`[GOOGLE AUTH] Returning customer signed in: ${user.name} (${user.email}, ID: ${user.id})`);
 
       return res.json({
         success: true,
@@ -716,74 +740,14 @@ router.post("/google", async (req, res, next) => {
         user: {
           id: user.id,
           name: user.name,
-          phone: user.phone,
+          phone: user.phone || null,
           email: user.email,
           role: user.role
         }
       });
     }
 
-    // 2. NEW CUSTOMER: 10-digit Indian mobile number is required
-    const cleanPhone = phone ? validateIndianPhone(phone) : null;
-    if (!cleanPhone) {
-      return res.json({
-        success: false,
-        requiresPhone: true,
-        email: cleanEmail,
-        name: cleanName,
-        googleId: extractedSub,
-        picture: extractedPic,
-        message: "New Customer Registration: Please provide your 10-digit mobile number."
-      });
-    }
-
-    // Check if customer already exists by phone to prevent duplicate accounts
-    let existingByPhone = await db.get("SELECT * FROM users WHERE phone = $1", [cleanPhone]);
-    if (!existingByPhone && isMongoReady) {
-      try {
-        existingByPhone = await User.findOne({ phone: cleanPhone }).lean();
-      } catch (_) {}
-    }
-
-    if (existingByPhone) {
-      // Existing phone number found: Link Google credentials to existing customer account
-      try {
-        await db.run(
-          "UPDATE users SET email = $1, google_id = $2, updated_at = CURRENT_TIMESTAMP WHERE id = $3",
-          [cleanEmail, extractedSub || null, existingByPhone.id]
-        );
-      } catch (_) {}
-      existingByPhone.email = cleanEmail;
-      existingByPhone.google_id = extractedSub || null;
-
-      await syncUserToMongo(existingByPhone, {
-        google_id: extractedSub || null,
-        google_picture: extractedPic || null,
-        last_login: new Date()
-      });
-      await linkGuestOrdersToMongo(existingByPhone.id, cleanPhone, cleanEmail);
-
-      const token = generateToken({ id: existingByPhone.id, role: existingByPhone.role });
-      setAuthCookie(res, token);
-
-      console.log(`[GOOGLE AUTH] Existing customer linked via mobile: ${existingByPhone.name} (+91 ${cleanPhone})`);
-
-      return res.json({
-        success: true,
-        isNewUser: false,
-        message: `Welcome back, ${existingByPhone.name}! Your Google account has been linked.`,
-        token,
-        user: {
-          id: existingByPhone.id,
-          name: existingByPhone.name,
-          phone: existingByPhone.phone,
-          email: existingByPhone.email,
-          role: existingByPhone.role
-        }
-      });
-    }
-
-    // Brand New Customer: Insert and save in MongoDB Atlas
+    // 2. BRAND NEW CUSTOMER: Create an isolated, independent customer profile
     let nextId = Date.now();
     try {
       if (isMongoReady) {
@@ -792,15 +756,31 @@ router.post("/google", async (req, res, next) => {
           nextId = Math.max(lastUser.id + 1, nextId);
         }
       }
-    } catch (_) {}
+    } catch (_) { }
 
-    const result = await db.run(
-      `INSERT INTO users (name, phone, email, role, google_id)
-       VALUES ($1, $2, $3, 'customer', $4)`,
-      [cleanName, cleanPhone, cleanEmail, extractedSub || null]
-    );
+    // Insert new user into SQLite with their unique Google account details
+    let insertedId = nextId;
+    try {
+      const result = await db.run(
+        `INSERT INTO users (name, phone, email, role, google_id)
+         VALUES ($1, $2, $3, 'customer', $4)`,
+        [cleanName, cleanPhone, cleanEmail, extractedSub || null]
+      );
+      if (result && result.lastInsertRowid) {
+        insertedId = result.lastInsertRowid;
+      }
+    } catch (insertErr) {
+      // If phone unique constraint triggers due to a shared/test phone, insert without phone to guarantee isolation
+      const resultNoPhone = await db.run(
+        `INSERT INTO users (name, email, role, google_id)
+         VALUES ($1, $2, 'customer', $3)`,
+        [cleanName, cleanEmail, extractedSub || null]
+      );
+      if (resultNoPhone && resultNoPhone.lastInsertRowid) {
+        insertedId = resultNoPhone.lastInsertRowid;
+      }
+    }
 
-    const insertedId = result.lastInsertRowid || nextId;
     let newUser = await db.get("SELECT * FROM users WHERE id = $1", [insertedId]);
     if (!newUser) {
       newUser = {
@@ -814,10 +794,10 @@ router.post("/google", async (req, res, next) => {
     }
 
     try {
-      await db.run("INSERT INTO customer_profiles (user_id) VALUES ($1)", [newUser.id]);
-    } catch (_) {}
+      await db.run("INSERT OR IGNORE INTO customer_profiles (user_id) VALUES ($1)", [newUser.id]);
+    } catch (_) { }
 
-    // Save in MongoDB Atlas
+    // Save in MongoDB Atlas as a separate customer profile
     await syncUserToMongo(newUser, {
       google_id: extractedSub || null,
       google_picture: extractedPic || null,
@@ -828,7 +808,7 @@ router.post("/google", async (req, res, next) => {
     const token = generateToken({ id: newUser.id, role: newUser.role });
     setAuthCookie(res, token);
 
-    console.log(`[GOOGLE AUTH] New Customer Registered in MongoDB Atlas: ${newUser.name} (+91 ${cleanPhone}, ${cleanEmail})`);
+    console.log(`[GOOGLE AUTH] New Customer Profile Created: ${newUser.name} (ID: ${newUser.id}, ${cleanEmail})`);
 
     return res.status(201).json({
       success: true,
@@ -838,7 +818,7 @@ router.post("/google", async (req, res, next) => {
       user: {
         id: newUser.id,
         name: newUser.name,
-        phone: newUser.phone,
+        phone: newUser.phone || null,
         email: newUser.email,
         role: newUser.role
       }
@@ -1149,8 +1129,8 @@ router.post("/fast-login", async (req, res, next) => {
       const defaultName = name && name.trim()
         ? name.trim()
         : validatedPhone
-        ? `Customer ${validatedPhone.slice(-4)}`
-        : cleanEmail.split("@")[0];
+          ? `Customer ${validatedPhone.slice(-4)}`
+          : cleanEmail.split("@")[0];
 
       const result = await db.run(
         `INSERT INTO users (phone, email, name, role) VALUES ($1, $2, $3, 'customer')`,
@@ -1294,9 +1274,57 @@ router.get("/me", async (req, res) => {
     return res.json({ success: true, user: null, isAuthenticated: false });
   }
 
+  let fullUser = { ...req.user };
+
+  if (req.user.role !== "admin") {
+    try {
+      // 1. Fetch user profile from MongoDB Atlas
+      let mUser = null;
+      if (mongoose.connection && mongoose.connection.readyState === 1 && User) {
+        mUser = await User.findOne({ id: req.user.id }).lean();
+      }
+      if (mUser) {
+        fullUser.delivery_address = mUser.delivery_address || fullUser.delivery_address || null;
+        fullUser.city = mUser.city || fullUser.city || "Malegaon";
+        fullUser.state = mUser.state || fullUser.state || "Maharashtra";
+        fullUser.pincode = mUser.pincode || fullUser.pincode || "423203";
+        fullUser.name = mUser.name || fullUser.name;
+        fullUser.phone = mUser.phone || fullUser.phone;
+        fullUser.email = mUser.email || fullUser.email;
+      }
+
+      // 2. If delivery_address is still null, look up default address in Address collection / table
+      if (!fullUser.delivery_address || !fullUser.delivery_address.area_street) {
+        let addr = null;
+        const { Address } = await import("../models/index.js");
+        if (mongoose.connection && mongoose.connection.readyState === 1 && Address) {
+          addr = await Address.findOne({ user_id: req.user.id }).sort({ is_default: -1, _id: -1 }).lean();
+        }
+        if (!addr) {
+          addr = await db.get(
+            "SELECT * FROM addresses WHERE user_id = $1 ORDER BY is_default DESC, id DESC LIMIT 1",
+            [req.user.id]
+          );
+        }
+        if (addr) {
+          fullUser.delivery_address = {
+            flat_house: addr.flat_house || "",
+            area_street: addr.area_street || "",
+            city: addr.city || "Malegaon",
+            state: addr.state || "Maharashtra",
+            pincode: addr.pincode || "423203"
+          };
+          fullUser.city = addr.city || fullUser.city || "Malegaon";
+          fullUser.state = addr.state || fullUser.state || "Maharashtra";
+          fullUser.pincode = addr.pincode || fullUser.pincode || "423203";
+        }
+      }
+    } catch (_) { }
+  }
+
   res.json({
     success: true,
-    user: req.user,
+    user: fullUser,
     isAuthenticated: true
   });
 });

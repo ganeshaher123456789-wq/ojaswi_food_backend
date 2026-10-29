@@ -93,6 +93,11 @@ export const emailService = {
       ? order.delivery_address
       : JSON.parse(order.delivery_address_json || "{}");
 
+    const isCOD = !order.payment_method || 
+                  order.payment_method.toLowerCase().includes("cash") || 
+                  order.payment_method.toLowerCase().includes("cod");
+    const paymentStatusDisplay = isCOD ? "Payment Pending — Cash on Delivery" : (order.payment_status || "Pending");
+
     const orderHtml = `
       <div style="background-color: #080808; color: #ffffff; font-family: 'Segoe UI', Arial, sans-serif; padding: 40px 20px;">
         <div style="max-width: 650px; margin: auto; background-color: #121212; border: 1px solid rgba(217,164,65,0.3); border-radius: 8px; padding: 35px 25px;">
@@ -101,8 +106,8 @@ export const emailService = {
             <p style="color: #999999; font-size: 11px; letter-spacing: 3px; margin: 0;">OFFICIAL ORDER INVOICE - ${order.id}</p>
           </div>
           <div style="background: #171717; border-left: 3px solid #d9a441; padding: 15px; margin-bottom: 25px; border-radius: 4px;">
-            <p style="margin: 0 0 5px 0; color: #f0c86b; font-weight: bold;">Order Status: ${order.order_status}</p>
-            <p style="margin: 0; color: #cccccc; font-size: 13px;">Payment: ${order.payment_method} (${order.payment_status})</p>
+            <p style="margin: 0 0 5px 0; color: #f0c86b; font-weight: bold;">Order Status: ${order.order_status || 'Confirmed'}</p>
+            <p style="margin: 0; color: #cccccc; font-size: 13px;">Payment: ${order.payment_method || 'Cash on Delivery'} (${paymentStatusDisplay})</p>
           </div>
           <div style="margin-bottom: 25px;">
             <h3 style="color: #d9a441; font-size: 14px; text-transform: uppercase; margin-bottom: 8px;">Delivery Details</h3>
@@ -140,39 +145,68 @@ export const emailService = {
     `;
 
     const transport = getTransporter();
+    const result = {
+      customer: { attempted: false, success: false, error: null, provider: transport ? "smtp" : (ENV.EMAIL_PROVIDER || "console") },
+      company: { attempted: false, success: false, error: null, provider: transport ? "smtp" : (ENV.EMAIL_PROVIDER || "console") }
+    };
 
     // 1. Send to Customer if customer email exists
-    if (order.customer_email && transport) {
-      try {
-        await transport.sendMail({
-          from: ENV.EMAIL_FROM,
-          to: order.customer_email,
-          subject: `Order Confirmed: ${order.id} - Ojaswi Premium Spices`,
-          html: orderHtml
-        });
-        console.log(`[Email] Customer order receipt sent to ${order.customer_email}`);
-      } catch (err) {
-        console.warn("[Email] Failed to send customer receipt:", err.message);
+    if (order.customer_email) {
+      result.customer.attempted = true;
+      if (transport) {
+        try {
+          await transport.sendMail({
+            from: ENV.EMAIL_FROM,
+            to: order.customer_email,
+            subject: `Order Confirmed: ${order.id} - Ojaswi Premium Spices`,
+            html: orderHtml
+          });
+          result.customer.success = true;
+          console.log(`[Email] Customer order receipt sent to ${order.customer_email}`);
+        } catch (err) {
+          result.customer.success = false;
+          result.customer.error = err.message;
+          console.warn("[Email] Failed to send customer receipt:", err.message);
+        }
+      } else if (ENV.EMAIL_PROVIDER === "smtp") {
+        result.customer.success = false;
+        result.customer.error = "SMTP credentials (SMTP_USER, SMTP_PASS) not configured.";
+        console.warn("[Email] SMTP configured but credentials missing.");
+      } else {
+        result.customer.success = true;
+        result.customer.provider = "console_simulation";
+        console.log(`[Email:Dev] Simulated customer receipt to ${order.customer_email} for order ${order.id}`);
       }
     }
 
     // 2. Send to Ojaswi Company Email
-    if (transport && ENV.COMPANY_NOTIFY_EMAIL) {
-      try {
-        await transport.sendMail({
-          from: ENV.EMAIL_FROM,
-          to: ENV.COMPANY_NOTIFY_EMAIL,
-          subject: `NEW ORDER ALERT: ${order.id} (₹${order.total_amount})`,
-          html: orderHtml
-        });
-        console.log(`[Email] Company order alert sent to ${ENV.COMPANY_NOTIFY_EMAIL}`);
-      } catch (err) {
-        console.warn("[Email] Failed to send company alert:", err.message);
+    if (ENV.COMPANY_NOTIFY_EMAIL) {
+      result.company.attempted = true;
+      if (transport) {
+        try {
+          await transport.sendMail({
+            from: ENV.EMAIL_FROM,
+            to: ENV.COMPANY_NOTIFY_EMAIL,
+            subject: `NEW ORDER ALERT: ${order.id} (₹${order.total_amount})`,
+            html: orderHtml
+          });
+          result.company.success = true;
+          console.log(`[Email] Company order alert sent to ${ENV.COMPANY_NOTIFY_EMAIL}`);
+        } catch (err) {
+          result.company.success = false;
+          result.company.error = err.message;
+          console.warn("[Email] Failed to send company alert:", err.message);
+        }
+      } else if (ENV.EMAIL_PROVIDER === "smtp") {
+        result.company.success = false;
+        result.company.error = "SMTP credentials (SMTP_USER, SMTP_PASS) not configured.";
+      } else {
+        result.company.success = true;
+        result.company.provider = "console_simulation";
+        console.log(`[Email:Dev] Simulated company alert to ${ENV.COMPANY_NOTIFY_EMAIL} for order ${order.id}`);
       }
     }
 
-    if (!transport) {
-      console.log(`[Email:Dev] Order ${order.id} created for ${order.customer_name} (Total: ₹${order.total_amount}). Alerts simulated.`);
-    }
+    return result;
   }
 };

@@ -1,7 +1,7 @@
 import express from "express";
 import mongoose from "mongoose";
 import { db } from "../config/db.js";
-import { User, Order, Product, Payment, Address } from "../models/index.js";
+import { User, Order, Product, Payment, Address, Notification } from "../models/index.js";
 import { generateOrderId, validateIndianPhone, validateIndianPincode, validateEmail } from "../utils/helpers.js";
 import { paymentService } from "../services/paymentService.js";
 import { notificationService } from "../services/notificationService.js";
@@ -81,7 +81,7 @@ router.post("/", async (req, res, next) => {
       return res.status(400).json({ success: false, error: "Please provide a valid delivery address." });
     }
 
-    // 3. Validate Cart Items from Database
+    // 3. Validate Cart Items from Database (MongoDB Atlas / SQLite)
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ success: false, error: "Your shopping cart is empty." });
     }
@@ -90,14 +90,34 @@ router.post("/", async (req, res, next) => {
     let subtotal = 0;
 
     for (const item of items) {
-      const product = await db.get("SELECT * FROM products WHERE id = $1 AND is_active = 1", [
-        item.productId || item.id
-      ]);
+      const targetId = item.productId || item.id;
+      let product = null;
+
+      if (typeof targetId === "number" || (typeof targetId === "string" && /^\d+$/.test(targetId))) {
+        const numId = parseInt(targetId, 10);
+        try {
+          if (mongoose.connection && mongoose.connection.readyState === 1 && Product) {
+            product = await Product.findOne({ id: numId, is_active: { $in: [1, true] } }).lean();
+          }
+        } catch (_) { }
+        if (!product) {
+          product = await db.get("SELECT * FROM products WHERE id = $1 AND is_active = 1", [numId]);
+        }
+      } else if (typeof targetId === "string") {
+        try {
+          if (mongoose.connection && mongoose.connection.readyState === 1 && Product) {
+            product = await Product.findOne({ slug: targetId, is_active: { $in: [1, true] } }).lean();
+          }
+        } catch (_) { }
+        if (!product) {
+          product = await db.get("SELECT * FROM products WHERE slug = $1 AND is_active = 1", [targetId]);
+        }
+      }
 
       if (!product) {
         return res.status(400).json({
           success: false,
-          error: `Product with ID ${item.productId || item.id} is not available.`
+          error: `Product with ID ${targetId} is not available.`
         });
       }
 
@@ -116,7 +136,8 @@ router.post("/", async (req, res, next) => {
         });
       }
 
-      const unitPrice = product.selling_price || product.price;
+      // Backend price calculation: never trust client-provided unit price
+      const unitPrice = Number(product.selling_price || product.price);
       const itemTotal = unitPrice * qty;
       subtotal += itemTotal;
 
@@ -137,49 +158,65 @@ router.post("/", async (req, res, next) => {
 
     // Idempotency check: prevent duplicate orders if client retries within 45 seconds
     try {
-      const recentDuplicate = await Order.findOne({
-        customer_phone: cleanPhone,
-        total_amount: totalAmount,
-        created_at: { $gte: new Date(Date.now() - 45 * 1000) }
-      }).lean();
+      let recentDuplicate = null;
+      if (mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+        recentDuplicate = await Order.findOne({
+          customer_phone: cleanPhone,
+          total_amount: totalAmount,
+          created_at: { $gte: new Date(Date.now() - 45 * 1000) }
+        }).lean();
+      }
+      if (!recentDuplicate) {
+        recentDuplicate = await db.get(
+          `SELECT * FROM orders 
+           WHERE customer_phone = $1 AND total_amount = $2 
+           AND created_at >= datetime('now', '-45 seconds') 
+           ORDER BY created_at DESC LIMIT 1`,
+          [cleanPhone, totalAmount]
+        );
+      }
 
       if (recentDuplicate) {
         console.log(`[ORDER RETRY] Returning existing order ${recentDuplicate.id} for phone ${cleanPhone}`);
+        let dupItems = recentDuplicate.items && recentDuplicate.items.length > 0 ? recentDuplicate.items : [];
+        if (dupItems.length === 0) {
+          try {
+            dupItems = await db.all("SELECT * FROM order_items WHERE order_id = $1", [recentDuplicate.id]);
+          } catch (_) { }
+        }
         return res.json({
           success: true,
           message: "Order placed successfully!",
           orderId: recentDuplicate.id,
           order: recentDuplicate,
-          items: recentDuplicate.items && recentDuplicate.items.length > 0 ? recentDuplicate.items : orderItems,
-          requiresOnlinePayment: false
+          items: dupItems.length > 0 ? dupItems : orderItems,
+          requiresOnlinePayment: false,
+          isDuplicate: true
         });
       }
-    } catch (_) {}
+    } catch (_) { }
 
-    const orderId = (req.body.orderId && typeof req.body.orderId === "string" && req.body.orderId.trim().length >= 4)
+    // Unique Order ID generation
+    let orderId = (req.body.orderId && typeof req.body.orderId === "string" && req.body.orderId.trim().length >= 4)
       ? (req.body.orderId.trim().startsWith("#") ? req.body.orderId.trim() : `#${req.body.orderId.trim()}`)
       : generateOrderId();
-    const isCOD = !payment_method || 
-                  payment_method.toLowerCase().includes("cash on delivery") || 
-                  payment_method.toLowerCase().includes("cod");
+
+    // Verify orderId uniqueness
+    try {
+      const existing = await db.get("SELECT id FROM orders WHERE id = $1", [orderId]);
+      if (existing) {
+        orderId = generateOrderId();
+      }
+    } catch (_) { }
+
+    const isCOD = !payment_method ||
+      payment_method.toLowerCase().includes("cash on delivery") ||
+      payment_method.toLowerCase().includes("cod");
     const paymentStatus = isCOD ? OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING : "Created";
     const orderStatus = isCOD ? "Confirmed" : "Pending";
 
-    // Associate order with verified authenticated customer ID, or auto-match registered customer by phone/email
-    let userId = req.user ? req.user.id : null;
-    if (!userId) {
-      try {
-        const matched = await User.findOne({
-          $or: [
-            ...(cleanPhone ? [{ phone: cleanPhone }] : []),
-            ...(customer_email ? [{ email: customer_email.trim().toLowerCase() }] : [])
-          ]
-        }).lean();
-        if (matched) {
-          userId = matched.id;
-        }
-      } catch (_) {}
-    }
+    // Associate order with verified authenticated customer ID (strictly isolate by req.user.id)
+    const userId = req.user ? req.user.id : null;
 
     const addressJson = JSON.stringify(cleanAddress);
 
@@ -232,76 +269,78 @@ router.post("/", async (req, res, next) => {
 
     // 5b. Persist Order and Items directly to MongoDB Atlas
     try {
-      await Order.findOneAndUpdate(
-        { id: orderId },
-        {
-          id: orderId,
-          user_id: userId,
-          customer_name: customer_name.trim(),
-          customer_phone: cleanPhone,
-          customer_email: customer_email ? customer_email.trim().toLowerCase() : null,
-          subtotal,
-          delivery_charge: deliveryCharge,
-          discount_amount: 0,
-          total_amount: totalAmount,
-          payment_method: isCOD ? OJASWI_CONSTANTS.PAYMENT_METHODS.COD : OJASWI_CONSTANTS.PAYMENT_METHODS.ONLINE,
-          payment_status: paymentStatus,
-          order_status: orderStatus,
-          delivery_address: cleanAddress,
-          delivery_address_json: addressJson,
-          items: orderItems,
-          notes: notes || null,
-          created_at: new Date(),
-          updated_at: new Date()
-        },
-        { upsert: true, returnDocument: 'after' }
-      );
+      if (mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+        await Order.findOneAndUpdate(
+          { id: orderId },
+          {
+            id: orderId,
+            user_id: userId,
+            customer_name: customer_name.trim(),
+            customer_phone: cleanPhone,
+            customer_email: customer_email ? customer_email.trim().toLowerCase() : null,
+            subtotal,
+            delivery_charge: deliveryCharge,
+            discount_amount: 0,
+            total_amount: totalAmount,
+            payment_method: isCOD ? OJASWI_CONSTANTS.PAYMENT_METHODS.COD : OJASWI_CONSTANTS.PAYMENT_METHODS.ONLINE,
+            payment_status: paymentStatus,
+            order_status: orderStatus,
+            delivery_address: cleanAddress,
+            delivery_address_json: addressJson,
+            items: orderItems,
+            notes: notes || null,
+            created_at: new Date(),
+            updated_at: new Date()
+          },
+          { upsert: true, returnDocument: 'after' }
+        );
 
-      // Update customer stats and address in MongoDB Atlas
-      if (userId) {
-        try {
-          await User.findOneAndUpdate(
-            { id: userId },
-            {
-              $inc: { total_orders: 1, total_spent: totalAmount },
-              $set: {
-                last_order_id: orderId,
-                last_order_date: new Date(),
-                delivery_address: cleanAddress,
-                city: cleanAddress.city || "Malegaon",
-                state: cleanAddress.state || "Maharashtra",
-                pincode: cleanAddress.pincode || "423203",
-                updated_at: new Date()
+        // Update customer stats and address in MongoDB Atlas
+        if (userId) {
+          try {
+            await User.findOneAndUpdate(
+              { id: userId },
+              {
+                $inc: { total_orders: 1, total_spent: totalAmount },
+                $set: {
+                  last_order_id: orderId,
+                  last_order_date: new Date(),
+                  delivery_address: cleanAddress,
+                  city: cleanAddress.city || "Malegaon",
+                  state: cleanAddress.state || "Maharashtra",
+                  pincode: cleanAddress.pincode || "423203",
+                  updated_at: new Date()
+                }
               }
-            }
-          );
-        } catch (uErr) {
-          console.warn("[MongoDB] Customer order stats sync notice:", uErr.message);
+            );
+          } catch (uErr) {
+            console.warn("[MongoDB] Customer order stats sync notice:", uErr.message);
+          }
+
+          // Record address in Address collection
+          try {
+            await Address.create({
+              user_id: userId,
+              recipient_name: customer_name.trim(),
+              recipient_phone: cleanPhone,
+              flat_house: cleanAddress.flat_house,
+              area_street: cleanAddress.area_street,
+              city: cleanAddress.city || "Malegaon",
+              state: cleanAddress.state || "Maharashtra",
+              pincode: cleanAddress.pincode || "423203",
+              is_default: true,
+              created_at: new Date()
+            });
+          } catch (_) { }
         }
 
-        // Record address in Address collection
-        try {
-          await Address.create({
-            user_id: userId,
-            recipient_name: customer_name.trim(),
-            recipient_phone: cleanPhone,
-            flat_house: cleanAddress.flat_house,
-            area_street: cleanAddress.area_street,
-            city: cleanAddress.city || "Malegaon",
-            state: cleanAddress.state || "Maharashtra",
-            pincode: cleanAddress.pincode || "423203",
-            is_default: true,
-            created_at: new Date()
-          });
-        } catch (_) {}
-      }
-
-      if (isCOD) {
-        for (const item of orderItems) {
-          await Product.findOneAndUpdate(
-            { id: item.product_id },
-            { $inc: { stock: -item.quantity } }
-          );
+        if (isCOD) {
+          for (const item of orderItems) {
+            await Product.findOneAndUpdate(
+              { id: item.product_id },
+              { $inc: { stock: -item.quantity } }
+            );
+          }
         }
       }
     } catch (mErr) {
@@ -313,16 +352,25 @@ router.post("/", async (req, res, next) => {
 
     // 6. Handle COD vs Online Payment
     if (isCOD) {
-      // Dispatches WhatsApp, SMS, and Email
-      notificationService.notifyOrderPlaced(createdOrder, orderItems).catch(console.error);
+      // Dispatches WhatsApp, SMS, and Email safely without ever losing the saved order
+      let notificationStatuses = null;
+      try {
+        notificationStatuses = await notificationService.notifyOrderPlaced(createdOrder, orderItems);
+      } catch (nErr) {
+        console.warn(`[Notifications] Order ${orderId} notification dispatch notice:`, nErr.message);
+      }
 
       return res.json({
         success: true,
         message: "Order placed successfully!",
         orderId,
-        order: createdOrder,
+        order: {
+          ...createdOrder,
+          payment_status: OJASWI_CONSTANTS.PAYMENT_STATUSES.COD_PENDING
+        },
         items: orderItems,
-        requiresOnlinePayment: false
+        requiresOnlinePayment: false,
+        notificationStatuses
       });
     }
 
@@ -373,64 +421,106 @@ router.get("/", async (req, res, next) => {
 
     // Authenticated customer: strictly access only their own orders by authenticated user_id
     if (!req.user || !req.user.id) {
-      return res.json({
-        success: true,
+      return res.status(401).json({
+        success: false,
         orders: [],
         requiresAuth: true,
-        message: "Please log in to view your order history."
+        error: "Authentication required. Please log in to view your orders."
       });
     }
 
     const customerId = req.user.id;
-    let mFilter = { user_id: customerId };
+    const isAdmin = req.user.role === "admin";
+    let mFilter = {};
 
-    if (orderId && orderId.trim()) {
-      const cleanId = orderId.trim();
-      const withHash = cleanId.startsWith("#") ? cleanId : `#${cleanId}`;
-      const withoutHash = cleanId.startsWith("#") ? cleanId.slice(1) : cleanId;
-      mFilter = {
-        user_id: customerId,
-        $or: [{ id: cleanId }, { id: withHash }, { id: withoutHash }]
-      };
-    } else if (search && search.trim()) {
-      const q = search.trim();
-      mFilter = {
-        user_id: customerId,
-        $or: [
-          { id: new RegExp(q, "i") },
-          { customer_name: new RegExp(q, "i") }
-        ]
-      };
+    if (isAdmin) {
+      if (orderId && orderId.trim()) {
+        const cleanId = orderId.trim();
+        const withHash = cleanId.startsWith("#") ? cleanId : `#${cleanId}`;
+        const withoutHash = cleanId.startsWith("#") ? cleanId.slice(1) : cleanId;
+        mFilter = { $or: [{ id: cleanId }, { id: withHash }, { id: withoutHash }] };
+      } else if (search && search.trim()) {
+        const q = search.trim();
+        mFilter = {
+          $or: [
+            { id: new RegExp(q, "i") },
+            { customer_name: new RegExp(q, "i") },
+            { customer_phone: new RegExp(q, "i") }
+          ]
+        };
+      }
+    } else {
+      // Customer: strictly isolated to their own authenticated user_id ONLY (never mix user orders)
+      if (orderId && orderId.trim()) {
+        const cleanId = orderId.trim();
+        const withHash = cleanId.startsWith("#") ? cleanId : `#${cleanId}`;
+        const withoutHash = cleanId.startsWith("#") ? cleanId.slice(1) : cleanId;
+        mFilter = {
+          user_id: customerId,
+          $or: [{ id: cleanId }, { id: withHash }, { id: withoutHash }]
+        };
+      } else if (search && search.trim()) {
+        const q = search.trim();
+        mFilter = {
+          user_id: customerId,
+          $or: [
+            { id: new RegExp(q, "i") },
+            { customer_name: new RegExp(q, "i") }
+          ]
+        };
+      } else {
+        mFilter = { user_id: customerId };
+      }
     }
 
     let orders = [];
     try {
-      orders = await Order.find(mFilter).sort({ created_at: -1 }).limit(50).lean();
+      if (mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+        orders = await Order.find(mFilter).sort({ created_at: -1 }).limit(50).lean();
+      }
     } catch (mErr) {
       console.warn("[ORDERS] Atlas query fallback:", mErr.message);
     }
 
     if (!orders || orders.length === 0) {
-      if (orderId && orderId.trim()) {
-        const cleanId = orderId.trim().startsWith("#") ? orderId.trim() : `#${orderId.trim()}`;
-        orders = await db.all(
-          `SELECT * FROM orders WHERE user_id = $1 AND (id = $2 OR id = $3) ORDER BY created_at DESC LIMIT 10`,
-          [customerId, cleanId, orderId.trim()]
-        );
-      } else if (search && search.trim()) {
-        const q = search.trim();
-        const cleanId = q.startsWith("#") ? q : `#${q}`;
-        orders = await db.all(
-          `SELECT * FROM orders 
-           WHERE user_id = $1 AND (id LIKE $2 OR id = $3 OR customer_name LIKE $2) 
-           ORDER BY created_at DESC LIMIT 50`,
-          [customerId, `%${q}%`, cleanId]
-        );
+      if (isAdmin) {
+        if (orderId && orderId.trim()) {
+          const cleanId = orderId.trim().startsWith("#") ? orderId.trim() : `#${orderId.trim()}`;
+          orders = await db.all(
+            `SELECT * FROM orders WHERE id = $1 OR id = $2 ORDER BY created_at DESC LIMIT 10`,
+            [cleanId, orderId.trim()]
+          );
+        } else if (search && search.trim()) {
+          const q = search.trim();
+          orders = await db.all(
+            `SELECT * FROM orders WHERE id LIKE $1 OR customer_name LIKE $1 OR customer_phone LIKE $1 ORDER BY created_at DESC LIMIT 50`,
+            [`%${q}%`]
+          );
+        } else {
+          orders = await db.all(`SELECT * FROM orders ORDER BY created_at DESC LIMIT 50`);
+        }
       } else {
-        orders = await db.all(
-          `SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
-          [customerId]
-        );
+        if (orderId && orderId.trim()) {
+          const cleanId = orderId.trim().startsWith("#") ? orderId.trim() : `#${orderId.trim()}`;
+          orders = await db.all(
+            `SELECT * FROM orders WHERE user_id = $1 AND (id = $2 OR id = $3) ORDER BY created_at DESC LIMIT 10`,
+            [customerId, cleanId, orderId.trim()]
+          );
+        } else if (search && search.trim()) {
+          const q = search.trim();
+          const cleanId = q.startsWith("#") ? q : `#${q}`;
+          orders = await db.all(
+            `SELECT * FROM orders 
+             WHERE user_id = $1 AND (id LIKE $2 OR id = $3 OR customer_name LIKE $2) 
+             ORDER BY created_at DESC LIMIT 50`,
+            [customerId, `%${q}%`, cleanId]
+          );
+        } else {
+          orders = await db.all(
+            `SELECT * FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT 50`,
+            [customerId]
+          );
+        }
       }
     }
 
@@ -440,7 +530,7 @@ router.get("/", async (req, res, next) => {
         if (items.length === 0) {
           try {
             items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [o.id]);
-          } catch (_) {}
+          } catch (_) { }
         }
         let addr = o.delivery_address || {};
         if ((!addr || Object.keys(addr).length === 0) && o.delivery_address_json) {
@@ -450,8 +540,12 @@ router.get("/", async (req, res, next) => {
             addr = {};
           }
         }
+        const isCODOrder = !o.payment_method ||
+          o.payment_method.toLowerCase().includes("cash") ||
+          o.payment_method.toLowerCase().includes("cod");
         return {
           ...o,
+          payment_status: isCODOrder ? "Payment Pending — Cash on Delivery" : (o.payment_status || "Pending"),
           delivery_address: addr,
           items
         };
@@ -489,7 +583,7 @@ router.get("/:id", async (req, res, next) => {
         order = await Order.findOne({
           $or: [{ id: rawId }, { id: withHash }, { id: withoutHash }]
         }).lean();
-      } catch (_) {}
+      } catch (_) { }
     }
 
     // Fallback: search by suffix or partial match
@@ -502,7 +596,7 @@ router.get("/:id", async (req, res, next) => {
     if (!order) {
       try {
         order = await Order.findOne({ id: new RegExp(withoutHash, "i") }).lean();
-      } catch (_) {}
+      } catch (_) { }
     }
 
     if (!order) {
@@ -512,11 +606,15 @@ router.get("/:id", async (req, res, next) => {
       });
     }
 
-    // Customer Data Isolation: A logged-in customer cannot view another registered customer's order
-    if (req.user && req.user.role !== "admin" && order.user_id && req.user.id && String(order.user_id) !== String(req.user.id)) {
-      const isMatch = (req.user.phone && order.customer_phone === req.user.phone) ||
-                      (req.user.email && order.customer_email && order.customer_email.toLowerCase() === req.user.email.toLowerCase());
-      if (!isMatch) {
+    // Customer Data Isolation & Authorization Guard: Protect customer information
+    if (order.user_id) {
+      if (!req.user || !req.user.id) {
+        return res.status(401).json({
+          success: false,
+          error: "Authentication required. Please log in to view this order."
+        });
+      }
+      if (req.user.role !== "admin" && String(order.user_id) !== String(req.user.id)) {
         return res.status(403).json({
           success: false,
           error: "Access denied. You can only view your own orders."
@@ -529,10 +627,10 @@ router.get("/:id", async (req, res, next) => {
       order.user_id = req.user.id;
       try {
         await db.run("UPDATE orders SET user_id = $1 WHERE id = $2", [req.user.id, order.id]);
-        if (mongoose.connection && mongoose.connection.readyState === 1) {
+        if (mongoose.connection && mongoose.connection.readyState === 1 && Order) {
           await Order.findOneAndUpdate({ id: order.id }, { $set: { user_id: req.user.id } });
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     let items = order.items && order.items.length > 0 ? order.items : [];
@@ -553,6 +651,28 @@ router.get("/:id", async (req, res, next) => {
     let customerPhone = order.customer_phone;
     let customerEmail = order.customer_email;
     let safeAddress = { ...address };
+
+    // Fetch notification history for accurate delivery status
+    let notifications = [];
+    try {
+      if (mongoose.connection && mongoose.connection.readyState === 1 && Notification) {
+        notifications = await Notification.find({ order_id: { $in: [order.id, rawId, withHash, withoutHash] } }).sort({ created_at: -1 }).lean();
+      }
+    } catch (_) { }
+    if (!notifications || notifications.length === 0) {
+      try {
+        notifications = await db.all(
+          "SELECT * FROM notifications WHERE order_id = $1 OR order_id = $2 OR order_id = $3 ORDER BY created_at DESC",
+          [order.id, withHash, withoutHash]
+        );
+      } catch (_) { }
+    }
+
+    // Cash on Delivery status guarantee
+    const isCODOrder = !order.payment_method ||
+      order.payment_method.toLowerCase().includes("cash") ||
+      order.payment_method.toLowerCase().includes("cod");
+    const paymentStatusDisplay = isCODOrder ? "Payment Pending — Cash on Delivery" : (order.payment_status || "Pending");
 
     // Build order lifecycle timeline with all 8 official statuses
     const statusMeta = {
@@ -613,10 +733,12 @@ router.get("/:id", async (req, res, next) => {
       success: true,
       order: {
         ...order,
+        payment_status: paymentStatusDisplay,
         customer_phone: customerPhone,
         customer_email: customerEmail,
         delivery_address: safeAddress,
         items,
+        notifications: notifications || [],
         timeline,
         tracking: {
           current_stage: currentStatus,
@@ -675,11 +797,15 @@ router.get("/:id/receipt", async (req, res, next) => {
       });
     }
 
-    // Customer Receipt Isolation: A logged-in customer cannot view another registered customer's receipt
-    if (req.user && req.user.role !== "admin" && order.user_id && req.user.id && String(order.user_id) !== String(req.user.id)) {
-      const isMatch = (req.user.phone && order.customer_phone === req.user.phone) ||
-                      (req.user.email && order.customer_email && order.customer_email.toLowerCase() === req.user.email.toLowerCase());
-      if (!isMatch) {
+    // Customer Receipt Isolation: Strictly isolated to owner user_id
+    if (order.user_id) {
+      if (!req.user || !req.user.id) {
+        return res.status(401).json({
+          success: false,
+          error: "Authentication required. Please log in to view this receipt."
+        });
+      }
+      if (req.user.role !== "admin" && String(order.user_id) !== String(req.user.id)) {
         return res.status(403).json({
           success: false,
           error: "Access denied. You can only view your own order receipts."
@@ -695,7 +821,7 @@ router.get("/:id/receipt", async (req, res, next) => {
         if (mongoose.connection && mongoose.connection.readyState === 1) {
           await Order.findOneAndUpdate({ id: order.id }, { $set: { user_id: req.user.id } });
         }
-      } catch (_) {}
+      } catch (_) { }
     }
 
     if (!order.items || order.items.length === 0) {

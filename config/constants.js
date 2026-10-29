@@ -43,7 +43,7 @@ export const OJASWI_CONSTANTS = {
   },
 
   PAYMENT_STATUSES: {
-    COD_PENDING: "Pending - Cash on Delivery",
+    COD_PENDING: "Payment Pending — Cash on Delivery",
     PAID: "Paid",
     FAILED: "Failed",
     REFUNDED: "Refunded"

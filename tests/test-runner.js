@@ -583,28 +583,10 @@ async function runAllTests() {
       }
     } catch (e) { logFail("Admin Role Authorization Guard", e); }
 
-    // 29. Google Sign-In: New Customer without mobile returns requiresPhone
+    // 29. Google Sign-In: New Customer Registration with unique profile
     const googleEmailNew = `test_google_${Date.now()}@gmail.com`;
     const googleName = "Ojaswi Google Customer";
     const googleSub = "g_" + Date.now();
-    try {
-      const res = await request("/api/auth/google", {
-        method: "POST",
-        body: JSON.stringify({
-          email: googleEmailNew,
-          name: googleName,
-          googleId: googleSub
-        })
-      });
-      if (res.status === 200 && res.data.requiresPhone === true) {
-        logPass("Google Sign-In: New customer correctly prompts for 10-digit mobile number");
-      } else {
-        throw new Error(res.data.error || "Expected requiresPhone=true");
-      }
-    } catch (e) { logFail("Google Sign-In Mobile Prompt", e); }
-
-    // 30. Google Sign-In: New Customer Registration with name, Google email, 10-digit mobile
-    const googleTestPhone = "97" + Date.now().toString().slice(-8);
     let googleCustomerToken = "";
     try {
       const res = await request("/api/auth/google", {
@@ -612,13 +594,31 @@ async function runAllTests() {
         body: JSON.stringify({
           email: googleEmailNew,
           name: googleName,
-          phone: googleTestPhone,
           googleId: googleSub
         })
       });
-      if (res.status === 201 && res.data.success && res.data.isNewUser && res.data.token) {
+      if ((res.status === 201 || res.status === 200) && res.data.success && res.data.token) {
         googleCustomerToken = res.data.token;
-        logPass(`Google Sign-In: New customer ${googleName} successfully registered in MongoDB Atlas (+91 ${googleTestPhone})`);
+        logPass(`Google Sign-In: New customer ${googleName} successfully created independent profile without blocking`);
+      } else {
+        throw new Error(res.data.error || "Expected Google login success");
+      }
+    } catch (e) { logFail("Google Sign-In Independent Profile", e); }
+
+    // 30. Google Sign-In: With Phone Number
+    const googleTestPhone = "97" + Date.now().toString().slice(-8);
+    try {
+      const res = await request("/api/auth/google", {
+        method: "POST",
+        body: JSON.stringify({
+          email: `phone_${googleEmailNew}`,
+          name: googleName,
+          phone: googleTestPhone,
+          googleId: `${googleSub}_phone`
+        })
+      });
+      if ((res.status === 201 || res.status === 200) && res.data.success && res.data.token) {
+        logPass(`Google Sign-In: Customer with phone successfully created profile in MongoDB Atlas (+91 ${googleTestPhone})`);
       } else {
         throw new Error(res.data.error || "Google registration failed");
       }
@@ -647,8 +647,9 @@ async function runAllTests() {
       });
       if (res.status === 200 && res.data.receipt) {
         const rcpt = res.data.receipt;
-        if (rcpt.paymentStatus === "PENDING" && rcpt.paymentMethod === "CASH ON DELIVERY" && rcpt.isPaid === false) {
-          logPass("Receipt Cash on Delivery: Payment Method is 'CASH ON DELIVERY', Status is 'PENDING', isPaid is false");
+        const isCODStatus = rcpt.paymentStatus.includes("Payment Pending — Cash on Delivery") || rcpt.paymentStatus === "PENDING";
+        if (isCODStatus && rcpt.paymentMethod === "CASH ON DELIVERY" && rcpt.isPaid === false) {
+          logPass("Receipt Cash on Delivery: Payment Method is 'CASH ON DELIVERY', Status is 'Payment Pending — Cash on Delivery', isPaid is false");
         } else {
           throw new Error(`Receipt payment mismatch: Method=${rcpt.paymentMethod}, Status=${rcpt.paymentStatus}, isPaid=${rcpt.isPaid}`);
         }

@@ -128,9 +128,13 @@ export function generateReceiptData(order) {
     },
     invoiceDate: `${dateStr} at ${timeStr}`,
     orderStatus: order.order_status || "Confirmed",
-    paymentStatus: order.payment_status === "Paid" ? "PAID" : "PENDING",
+    paymentStatus: ((order.payment_method || "").toLowerCase().includes("cash on delivery") || (order.payment_method || "").toLowerCase().includes("cod"))
+      ? "Payment Pending — Cash on Delivery"
+      : (order.payment_status === "Paid" ? "PAID" : "PENDING"),
     paymentMethod: ((order.payment_method || "").toLowerCase().includes("cash on delivery") || (order.payment_method || "").toLowerCase().includes("cod")) ? "CASH ON DELIVERY" : (order.payment_method || "CASH ON DELIVERY"),
-    isPaid: order.payment_status === "Paid",
+    isPaid: ((order.payment_method || "").toLowerCase().includes("cash on delivery") || (order.payment_method || "").toLowerCase().includes("cod"))
+      ? false
+      : order.payment_status === "Paid",
     seller: {
       name: "Ojaswi Foods",
       tradeName: "Ojaswi Premium Authentic Indian Spices",
