@@ -58,7 +58,11 @@ async function runMongoDBAtlasTests() {
     // 1. Connect and Start Server
     await connectMongo();
     server = app.listen(PORT);
-    await new Promise((r) => setTimeout(r, 400));
+    
+    // Allow up to 15s for Atlas handshake to complete
+    for (let i = 0; i < 30 && mongoose.connection.readyState !== 1; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
 
     // 2. Test Health Check for MongoDB Atlas status
     const healthRes = await request("/health");

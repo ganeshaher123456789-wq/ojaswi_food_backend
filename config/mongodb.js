@@ -43,9 +43,8 @@ export async function connectMongo() {
         dbName: process.env.MONGODB_DB_NAME || "ojaswi",
         maxPoolSize: 10,
         minPoolSize: 2,
-        serverSelectionTimeoutMS: 8000,
-        socketTimeoutMS: 45000,
-        family: 4 // IPv4 preference
+        serverSelectionTimeoutMS: 20000,
+        socketTimeoutMS: 45000
       });
 
       return { connected: true, configured: true };

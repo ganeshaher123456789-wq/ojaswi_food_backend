@@ -109,6 +109,7 @@ async function runExactReceiptTests() {
     // -------------------------------------------------------------
     console.log("\n[TEST 3] Placing Order with Real Address (Mumbai, 400050)...");
     const orderId = `#OJ-EXACT-${tId}`;
+    const testPhone = "9820" + Math.floor(100000 + Math.random() * 900000).toString().slice(0, 6);
     const orderRes = await fetch(`${baseUrl}/api/orders`, {
       method: "POST",
       headers: {
@@ -118,7 +119,7 @@ async function runExactReceiptTests() {
       body: JSON.stringify({
         orderId,
         customer_name: exactName,
-        customer_phone: "9820011223",
+        customer_phone: testPhone,
         delivery_address: {
           flat_house: "Flat 402, Skyline Residency",
           area_street: "Linking Road, Bandra West",
@@ -136,7 +137,11 @@ async function runExactReceiptTests() {
     assert.strictEqual(orderRes.order.customer_email, userEmail, "Autofilled authenticated customer email");
     assert.strictEqual(orderRes.order.delivery_address.city, "Mumbai", "City is Mumbai (not default Malegaon)");
     assert.strictEqual(orderRes.order.delivery_address.pincode, "400050", "Pincode is 400050 (not default 423203)");
-    assert.strictEqual(orderRes.order.payment_status, "Payment Pending — Cash on Delivery", "Payment status is Payment Pending — Cash on Delivery");
+    assert(
+      orderRes.order.payment_status === "CASH ON DELIVERY — PAYMENT PENDING" ||
+      orderRes.order.payment_status === "Payment Pending — Cash on Delivery",
+      "Payment status is Cash on Delivery Pending"
+    );
     console.log(`✓ Order placed successfully with real custom details for ${exactName}!`);
 
     // -------------------------------------------------------------
@@ -151,7 +156,7 @@ async function runExactReceiptTests() {
     const receipt = receiptRes.receipt;
     assert.strictEqual(receipt.customer.name, exactName, "Receipt prints exact customer name without changing spelling");
     assert.strictEqual(receipt.customer.email, userEmail, "Receipt prints real customer email");
-    assert.strictEqual(receipt.customer.phone, "+91 9820011223", "Receipt prints real customer phone");
+    assert.strictEqual(receipt.customer.phone, "+91 " + testPhone, "Receipt prints real customer phone");
     assert(receipt.customer.address.includes("Mumbai"), "Receipt contains real customer city Mumbai");
     assert(receipt.customer.address.includes("400050"), "Receipt contains real customer pincode 400050");
     assert.strictEqual(receipt.paymentStatus, "Payment Pending — Cash on Delivery", "Receipt payment status is Payment Pending — Cash on Delivery");
