@@ -1286,15 +1286,20 @@ router.get("/me", async (req, res) => {
       }
       if (mUser) {
         fullUser.delivery_address = mUser.delivery_address || fullUser.delivery_address || null;
-        fullUser.city = mUser.city || fullUser.city || "Malegaon";
-        fullUser.state = mUser.state || fullUser.state || "Maharashtra";
-        fullUser.pincode = mUser.pincode || fullUser.pincode || "423203";
+        fullUser.city = (!mUser.city || mUser.city === "Malegaon") ? null : mUser.city;
+        fullUser.state = mUser.state || null;
+        fullUser.pincode = (!mUser.pincode || mUser.pincode === "423203") ? null : mUser.pincode;
         fullUser.name = mUser.name || fullUser.name;
         fullUser.phone = mUser.phone || fullUser.phone;
         fullUser.email = mUser.email || fullUser.email;
       }
 
-      // 2. If delivery_address is still null, look up default address in Address collection / table
+      // 2. If delivery_address has legacy default values, clear it
+      if (fullUser.delivery_address && (fullUser.delivery_address.city === "Malegaon" && !fullUser.delivery_address.flat_house)) {
+        fullUser.delivery_address = null;
+      }
+
+      // 3. If delivery_address is still null, look up default address in Address collection / table
       if (!fullUser.delivery_address || !fullUser.delivery_address.area_street) {
         let addr = null;
         const { Address } = await import("../models/index.js");
@@ -1307,17 +1312,17 @@ router.get("/me", async (req, res) => {
             [req.user.id]
           );
         }
-        if (addr) {
+        if (addr && (addr.flat_house || addr.area_street)) {
           fullUser.delivery_address = {
             flat_house: addr.flat_house || "",
             area_street: addr.area_street || "",
-            city: addr.city || "Malegaon",
-            state: addr.state || "Maharashtra",
-            pincode: addr.pincode || "423203"
+            city: (!addr.city || addr.city === "Malegaon") ? "" : addr.city,
+            state: addr.state || "",
+            pincode: (!addr.pincode || addr.pincode === "423203") ? "" : addr.pincode
           };
-          fullUser.city = addr.city || fullUser.city || "Malegaon";
-          fullUser.state = addr.state || fullUser.state || "Maharashtra";
-          fullUser.pincode = addr.pincode || fullUser.pincode || "423203";
+          fullUser.city = fullUser.delivery_address.city || null;
+          fullUser.state = fullUser.delivery_address.state || null;
+          fullUser.pincode = fullUser.delivery_address.pincode || null;
         }
       }
     } catch (_) { }

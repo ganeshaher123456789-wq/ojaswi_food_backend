@@ -738,8 +738,8 @@ router.get("/:id", async (req, res, next) => {
     });
 
     const cleanTrackingCode = "OJ-" + order.id.replace(/\W/g, "").toUpperCase();
-    const city = address.city || "Malegaon";
-    const deliverySpot = order.delivery_spot || `${city} Delivery Hub`;
+    const city = address.city || "";
+    const deliverySpot = order.delivery_spot || (city ? `${city} Delivery Hub` : "Local Delivery Hub");
     let trackingNote = order.tracking_note;
     if (!trackingNote) {
       if (currentStatus === "Shipped") {
