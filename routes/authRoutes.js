@@ -706,7 +706,8 @@ router.post("/google", async (req, res, next) => {
         } catch (_) { }
       }
 
-      if (cleanName && (!user.name || user.name === "Customer")) {
+      // Exact Google name synchronization: maintain exact spelling from verified Google account
+      if (cleanName && (!user.name || user.name === "Customer" || user.name !== cleanName)) {
         user.name = cleanName;
         try {
           await db.run("UPDATE users SET name = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2", [cleanName, user.id]);

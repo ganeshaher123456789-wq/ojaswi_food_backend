@@ -48,7 +48,7 @@ function numberToWordsINR(amount) {
 /**
  * Formats full structured receipt object using actual order data
  */
-export function generateReceiptData(order) {
+export function generateReceiptData(order, userProfile = null) {
   const created = new Date(order.created_at || Date.now());
   const dateStr = created.toLocaleDateString("en-IN", {
     day: "numeric",
@@ -74,13 +74,15 @@ export function generateReceiptData(order) {
   }
   addr = addr || {};
 
+  // Build clean delivery address from actual customer data (never use fake or default city/pincode)
   const addressLine = [
     addr.flat_house,
     addr.area_street,
-    addr.city || "Malegaon",
+    addr.landmark,
+    addr.city,
     addr.district ? `${addr.district} Dist.` : "",
-    addr.state || "Maharashtra",
-    addr.pincode ? `PIN: ${addr.pincode}` : "423203"
+    addr.state,
+    addr.pincode ? `PIN: ${addr.pincode}` : ""
   ]
     .filter(Boolean)
     .join(", ");
@@ -114,6 +116,19 @@ export function generateReceiptData(order) {
 
   const totalGst = Math.round(totalAmount * 0.05 * 100) / 100;
 
+  // Resolve customer details from actual order and authenticated profile
+  const exactCustomerName = (order.customer_name && order.customer_name.trim()) || 
+                            (userProfile && userProfile.name && userProfile.name.trim()) || 
+                            "";
+
+  const rawPhone = order.customer_phone || (userProfile && userProfile.phone) || "";
+  const cleanPhone = String(rawPhone).replace(/^\+?91/, "").trim();
+  const customerPhoneFormatted = cleanPhone ? `+91 ${cleanPhone}` : "";
+
+  const customerEmail = (order.customer_email && order.customer_email.trim()) || 
+                        (userProfile && userProfile.email && userProfile.email.trim()) || 
+                        "";
+
   return {
     invoiceNumber,
     invoice_number: invoiceNumber,
@@ -145,9 +160,9 @@ export function generateReceiptData(order) {
       origin: "Malegaon, Nashik, Maharashtra - 423203"
     },
     customer: {
-      name: order.customer_name,
-      phone: `+91 ${order.customer_phone}`,
-      email: order.customer_email || "Not specified",
+      name: exactCustomerName,
+      phone: customerPhoneFormatted,
+      email: customerEmail,
       address: addressLine,
       structuredAddress: addr
     },

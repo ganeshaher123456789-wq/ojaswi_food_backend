@@ -27,12 +27,25 @@ router.post("/", async (req, res, next) => {
       notes
     } = req.body;
 
-    // 1. Validate Customer Info
-    if (!customer_name || typeof customer_name !== "string" || customer_name.trim().length < 2) {
+    // 1. Resolve & Validate Customer Info
+    let authUser = null;
+    if (req.user && req.user.id) {
+      try {
+        authUser = await db.get("SELECT * FROM users WHERE id = $1", [req.user.id]);
+      } catch (_) { }
+    }
+
+    // Exact name resolution: preserve customer's real name without alteration or spelling changes
+    let finalCustomerName = (customer_name && typeof customer_name === "string" && customer_name.trim().length >= 2)
+      ? customer_name.trim()
+      : (authUser && authUser.name ? authUser.name.trim() : "");
+
+    if (!finalCustomerName || finalCustomerName.length < 2) {
       return res.status(400).json({ success: false, error: "Please enter your full name." });
     }
 
-    const cleanPhone = validateIndianPhone(customer_phone);
+    let finalCustomerPhone = customer_phone || (authUser && authUser.phone) || null;
+    const cleanPhone = validateIndianPhone(finalCustomerPhone);
     if (!cleanPhone) {
       return res.status(400).json({
         success: false,
@@ -40,33 +53,34 @@ router.post("/", async (req, res, next) => {
       });
     }
 
-    if (customer_email && !validateEmail(customer_email)) {
-      return res.status(400).json({
-        success: false,
-        error: "Please enter a valid email address."
-      });
+    let finalCustomerEmail = customer_email || (authUser && authUser.email) || null;
+    if (finalCustomerEmail) {
+      finalCustomerEmail = finalCustomerEmail.trim().toLowerCase();
+      if (!validateEmail(finalCustomerEmail)) {
+        return res.status(400).json({
+          success: false,
+          error: "Please enter a valid email address."
+        });
+      }
     }
 
-    // 2. Validate & Normalize Delivery Address
+    // 2. Validate & Normalize Delivery Address (No default values; require real address)
     let cleanAddress = null;
     if (typeof delivery_address === "string" && delivery_address.trim().length > 0) {
       const addrStr = delivery_address.trim();
       cleanAddress = {
         flat_house: addrStr,
         area_street: addrStr,
-        city: "Malegaon",
-        state: "Maharashtra",
-        pincode: "423203"
+        city: "",
+        state: "",
+        pincode: ""
       };
     } else if (delivery_address && typeof delivery_address === "object") {
-      const rawStreet = delivery_address.area_street || delivery_address.address || delivery_address.street || "";
-      const rawHouse = delivery_address.flat_house || rawStreet || "Premises";
-      const rawCity = delivery_address.city || "Malegaon";
-      const rawState = delivery_address.state || "Maharashtra";
-      let rawPincode = delivery_address.pincode ? String(delivery_address.pincode).trim() : "";
-      if (!validateIndianPincode(rawPincode)) {
-        rawPincode = "423203";
-      }
+      const rawStreet = (delivery_address.area_street || delivery_address.address || delivery_address.street || "").trim();
+      const rawHouse = (delivery_address.flat_house || rawStreet || "").trim();
+      const rawCity = (delivery_address.city || "").trim();
+      const rawState = (delivery_address.state || "").trim();
+      const rawPincode = delivery_address.pincode ? String(delivery_address.pincode).trim() : "";
 
       cleanAddress = {
         flat_house: rawHouse,
@@ -78,7 +92,16 @@ router.post("/", async (req, res, next) => {
     }
 
     if (!cleanAddress || (!cleanAddress.flat_house && !cleanAddress.area_street)) {
-      return res.status(400).json({ success: false, error: "Please provide a valid delivery address." });
+      return res.status(400).json({ success: false, error: "Please enter your delivery flat, house, or street address." });
+    }
+    if (!cleanAddress.city) {
+      return res.status(400).json({ success: false, error: "Please enter your delivery city." });
+    }
+    if (!cleanAddress.state) {
+      return res.status(400).json({ success: false, error: "Please enter your delivery state." });
+    }
+    if (!validateIndianPincode(cleanAddress.pincode)) {
+      return res.status(400).json({ success: false, error: "Please enter a valid 6-digit Indian PIN code." });
     }
 
     // 3. Validate Cart Items from Database (MongoDB Atlas / SQLite)
@@ -227,9 +250,9 @@ router.post("/", async (req, res, next) => {
       [
         orderId,
         userId,
-        customer_name.trim(),
+        finalCustomerName,
         cleanPhone,
-        customer_email ? customer_email.trim().toLowerCase() : null,
+        finalCustomerEmail,
         subtotal,
         deliveryCharge,
         totalAmount,
@@ -275,9 +298,9 @@ router.post("/", async (req, res, next) => {
           {
             id: orderId,
             user_id: userId,
-            customer_name: customer_name.trim(),
+            customer_name: finalCustomerName,
             customer_phone: cleanPhone,
-            customer_email: customer_email ? customer_email.trim().toLowerCase() : null,
+            customer_email: finalCustomerEmail,
             subtotal,
             delivery_charge: deliveryCharge,
             discount_amount: 0,
@@ -306,9 +329,10 @@ router.post("/", async (req, res, next) => {
                   last_order_id: orderId,
                   last_order_date: new Date(),
                   delivery_address: cleanAddress,
-                  city: cleanAddress.city || "Malegaon",
-                  state: cleanAddress.state || "Maharashtra",
-                  pincode: cleanAddress.pincode || "423203",
+                  city: cleanAddress.city,
+                  state: cleanAddress.state,
+                  pincode: cleanAddress.pincode,
+                  phone: cleanPhone,
                   updated_at: new Date()
                 }
               }
@@ -321,13 +345,13 @@ router.post("/", async (req, res, next) => {
           try {
             await Address.create({
               user_id: userId,
-              recipient_name: customer_name.trim(),
+              recipient_name: finalCustomerName,
               recipient_phone: cleanPhone,
               flat_house: cleanAddress.flat_house,
               area_street: cleanAddress.area_street,
-              city: cleanAddress.city || "Malegaon",
-              state: cleanAddress.state || "Maharashtra",
-              pincode: cleanAddress.pincode || "423203",
+              city: cleanAddress.city,
+              state: cleanAddress.state,
+              pincode: cleanAddress.pincode,
               is_default: true,
               created_at: new Date()
             });
@@ -776,9 +800,14 @@ router.get("/:id/receipt", async (req, res, next) => {
     const withHash = rawId.startsWith("#") ? rawId : `#${rawId}`;
     const withoutHash = rawId.startsWith("#") ? rawId.slice(1) : rawId;
 
-    let order = await Order.findOne({
-      $or: [{ id: rawId }, { id: withHash }, { id: withoutHash }]
-    }).lean();
+    let order = null;
+    if (mongoose.connection && mongoose.connection.readyState === 1 && Order) {
+      try {
+        order = await Order.findOne({
+          $or: [{ id: rawId }, { id: withHash }, { id: withoutHash }]
+        }).lean();
+      } catch (_) { }
+    }
 
     if (!order) {
       order = await db.get(
@@ -828,7 +857,19 @@ router.get("/:id/receipt", async (req, res, next) => {
       order.items = await db.all("SELECT * FROM order_items WHERE order_id = $1", [order.id]);
     }
 
-    const receipt = generateReceiptData(order);
+    let userProfile = null;
+    if (order.user_id) {
+      try {
+        userProfile = await db.get("SELECT name, email, phone FROM users WHERE id = $1", [order.user_id]);
+      } catch (_) { }
+      if (!userProfile && mongoose.connection && mongoose.connection.readyState === 1 && User) {
+        try {
+          userProfile = await User.findOne({ id: order.user_id }).lean();
+        } catch (_) { }
+      }
+    }
+
+    const receipt = generateReceiptData(order, userProfile);
 
     if (req.query.format === "html" || (req.headers.accept && req.headers.accept.includes("text/html"))) {
       return res.send(renderReceiptHtml(receipt));
