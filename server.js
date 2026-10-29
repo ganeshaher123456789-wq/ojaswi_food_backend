@@ -179,10 +179,11 @@ const sendPage = (pageName) => (req, res) => {
   res.sendFile(p1);
 };
 
-app.get("/", sendPage("index.html"));
+app.get("/", sendPage("login.html"));
+app.get("/login", sendPage("login.html"));
+app.get("/store", sendPage("index.html"));
 app.get("/index.html", sendPage("index.html"));
 app.get("/index3.html", sendPage("index.html"));
-app.get("/login", sendPage("login.html"));
 app.get("/register", sendPage("login.html"));
 app.get("/verify-otp", sendPage("login.html"));
 app.get("/account", sendPage("account.html"));

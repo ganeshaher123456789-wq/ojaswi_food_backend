@@ -110,7 +110,7 @@ export function generateToken(payload, expiresIn = "30d") {
 }
 
 /**
- * Sets secure HttpOnly cookie on response
+ * Sets secure HttpOnly session cookie on response (Session-only: automatically cleared on browser close)
  */
 export function setAuthCookie(res, token) {
   const isProduction = ENV.NODE_ENV === "production";
@@ -118,7 +118,8 @@ export function setAuthCookie(res, token) {
     httpOnly: true,
     secure: isProduction,
     sameSite: isProduction ? "none" : "lax",
-    maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+    path: "/"
+    // Session cookie: no persistent maxAge so closing the browser destroys it
   });
 }
 
@@ -130,6 +131,7 @@ export function clearAuthCookie(res) {
   res.clearCookie("ojaswi_token", {
     httpOnly: true,
     secure: isProduction,
-    sameSite: isProduction ? "none" : "lax"
+    sameSite: isProduction ? "none" : "lax",
+    path: "/"
   });
 }
