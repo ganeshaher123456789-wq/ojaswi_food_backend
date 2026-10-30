@@ -210,11 +210,15 @@ async function startServer() {
   try {
     await seedDatabase();
 
-    // Connect to MongoDB Atlas and synchronize collections asynchronously so server binds immediately
+    // Connect to MongoDB Atlas asynchronously so server binds immediately
     connectMongo()
-      .then(() => syncMongoAtlas())
+      .then(() => {
+        if (process.env.AUTO_SYNC_ATLAS === "true") {
+          return syncMongoAtlas();
+        }
+      })
       .catch((mongoErr) => {
-        console.warn("[MongoDB] Startup sync notice:", mongoErr.message);
+        console.warn("[MongoDB] Startup notice:", mongoErr.message);
       });
 
     const host = process.env.NODE_ENV === "production" ? "0.0.0.0" : undefined;

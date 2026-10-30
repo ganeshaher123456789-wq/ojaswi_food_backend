@@ -8,6 +8,7 @@ yarn-debug.log*
 yarn-error.log*
 database/*.db-shm
 database/*.db-wal
+database/backups/
 scratch/
 .DS_Store
 Thumbs.db
