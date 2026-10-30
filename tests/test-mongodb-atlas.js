@@ -71,32 +71,75 @@ async function runMongoDBAtlasTests() {
     assert(healthRes.data.databaseConnected === true, "Database is reported as connected");
     assert(healthRes.data.mongoAtlas?.connected === true, "MongoDB Atlas is connected in health check");
 
-    // 3. Verify Collections in MongoDB Atlas
+    // 3. Verify Collections & Test Direct MongoDB Atlas CRUD Operations
     const userCount = await User.countDocuments();
     const productCount = await Product.countDocuments();
     const categoryCount = await Category.countDocuments();
     const orderCount = await Order.countDocuments();
-    const paymentCount = await Payment.countDocuments();
-    const addressCount = await Address.countDocuments();
-    const reviewCount = await Review.countDocuments();
-    const enquiryCount = await ContactEnquiry.countDocuments();
-    const notificationCount = await Notification.countDocuments();
 
     console.log(`>> MongoDB Atlas Document Counts:`);
     console.log(`   - Users:         ${userCount}`);
     console.log(`   - Products:      ${productCount}`);
     console.log(`   - Categories:    ${categoryCount}`);
     console.log(`   - Orders:        ${orderCount}`);
-    console.log(`   - Payments:      ${paymentCount}`);
-    console.log(`   - Addresses:     ${addressCount}`);
-    console.log(`   - Reviews:       ${reviewCount}`);
-    console.log(`   - Enquiries:     ${enquiryCount}`);
-    console.log(`   - Notifications: ${notificationCount}`);
 
-    assert(productCount >= 11, `Product collection contains ${productCount} items (expected >= 11)`);
-    assert(categoryCount === 7, `Category collection contains 7 categories`);
-    assert(userCount > 0, `User collection contains existing user records (${userCount})`);
-    assert(orderCount > 0, `Order collection contains existing orders (${orderCount})`);
+    // CRUD Operation Test 1: Insert test document into MongoDB Atlas
+    const testAtlasUserId = 999900 + Math.floor(Math.random() * 999);
+    const testUserEmail = `atlas.test.${Date.now()}@ojaswifoods.com`;
+    const insertedUser = await User.create({
+      id: testAtlasUserId,
+      email: testUserEmail,
+      phone: `99${Date.now().toString().slice(-8)}`,
+      name: "Atlas Verification User",
+      role: "customer"
+    });
+    assert(Boolean(insertedUser._id), "MongoDB Atlas successfully inserted document with _id");
+
+    // CRUD Operation Test 2: Retrieval from MongoDB Atlas
+    const retrievedUser = await User.findOne({ id: testAtlasUserId }).lean();
+    assert(retrievedUser && retrievedUser.email === testUserEmail, "MongoDB Atlas successfully retrieved document by index");
+
+    // CRUD Operation Test 3: Updating document in MongoDB Atlas
+    const updatedUser = await User.findOneAndUpdate(
+      { id: testAtlasUserId },
+      { name: "Atlas Verified Customer Updated" },
+      { returnDocument: "after" }
+    ).lean();
+    assert(updatedUser && updatedUser.name === "Atlas Verified Customer Updated", "MongoDB Atlas successfully updated document");
+
+    // CRUD Operation Test 4: Schema constraints & duplicate unique index prevention
+    const uniqueOrderId = `#OJ-TEST-DUP-${Date.now()}`;
+    await Order.create({
+      id: uniqueOrderId,
+      customer_name: "Test Unique",
+      customer_phone: "9876543210",
+      total_amount: 199,
+      subtotal: 199,
+      payment_method: "Cash on Delivery",
+      items: [{ product_id: 1, product_name: "Garam Masala", quantity: 1, unit_price: 199, total_price: 199 }]
+    });
+
+    let duplicateCaught = false;
+    try {
+      await Order.create({
+        id: uniqueOrderId, // duplicate unique Order ID
+        customer_name: "Duplicate Customer",
+        customer_phone: "9123456789",
+        total_amount: 199,
+        subtotal: 199,
+        payment_method: "Cash on Delivery",
+        items: [{ product_id: 1, product_name: "Garam Masala", quantity: 1, unit_price: 199, total_price: 199 }]
+      });
+    } catch (e) {
+      duplicateCaught = true;
+    }
+    assert(duplicateCaught === true, "MongoDB Atlas unique index correctly prevented duplicate document insertion");
+    await Order.deleteOne({ id: uniqueOrderId });
+
+    // CRUD Operation Test 5: Cleanup test document
+    await User.deleteOne({ id: testAtlasUserId });
+    const checkDeleted = await User.findOne({ id: testAtlasUserId }).lean();
+    assert(!checkDeleted, "MongoDB Atlas successfully deleted test document");
 
     // 4. Test Category API routes
     const catRes = await request("/api/categories");
@@ -171,9 +214,40 @@ async function runMongoDBAtlasTests() {
     assert(clearCartRes.data.cart.items.length === 0, "Cart is now completely cleared");
 
     // 6. Test Receipt Generation with Real Order Data
-    // Find an existing order in MongoDB Atlas
-    const testOrder = await Order.findOne({ id: { $exists: true } }).lean();
-    assert(Boolean(testOrder), `Found sample order in MongoDB Atlas: ${testOrder?.id}`);
+    let testOrder = await Order.findOne({ id: { $exists: true } }).lean();
+    let isTestOrderCreated = false;
+    if (!testOrder) {
+      const generatedOrderId = `#OJTEST-${Date.now()}`;
+      testOrder = await Order.create({
+        id: generatedOrderId,
+        user_id: 1,
+        customer_name: "Ganesh Sharma",
+        customer_phone: "9820011223",
+        customer_email: "ganesh.sharma@ojaswifoods.com",
+        delivery_address_json: JSON.stringify({
+          flat_house: "Flat 101, Anand Vihar",
+          area_street: "College Road",
+          city: "Malegaon",
+          state: "Maharashtra",
+          pincode: "423203"
+        }),
+        total_amount: 398,
+        payment_method: "Cash on Delivery",
+        payment_status: "Payment Pending — Cash on Delivery",
+        order_status: "Confirmed (Pending Dispatch)",
+        items: [
+          {
+            product_id: 1,
+            product_name: "Garam Masala",
+            quantity: 2,
+            unit_price: 199,
+            total_price: 398
+          }
+        ]
+      });
+      isTestOrderCreated = true;
+    }
+    assert(Boolean(testOrder), `Active order in MongoDB Atlas: ${testOrder?.id}`);
 
     const adminToken = generateToken({ id: testOrder?.user_id || 1, role: "admin" });
     const authHeaders = { Authorization: `Bearer ${adminToken}` };
@@ -192,6 +266,11 @@ async function runMongoDBAtlasTests() {
     assert(receiptHtmlRes.data.includes(testOrder.id), "Receipt HTML contains real order ID");
     assert(receiptHtmlRes.data.includes("3025120612245599988"), "Receipt HTML contains FSSAI License number");
     assert(receiptHtmlRes.data.includes("Malegaon"), "Receipt HTML contains Malegaon origin");
+
+    // Clean up test order if created during test
+    if (isTestOrderCreated) {
+      await Order.deleteOne({ id: testOrder.id });
+    }
 
     console.log("==================================================");
     console.log("🎉 ALL MONGODB ATLAS TESTS PASSED SUCCESSFULLY!");

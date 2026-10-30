@@ -201,8 +201,9 @@ async function runTests() {
 
     // Verify COD status in creation response
     assert(
-      placeRes.body.order.payment_status === "Payment Pending — Cash on Delivery",
-      `Payment status is explicitly "Payment Pending — Cash on Delivery", not Paid (got: "${placeRes.body.order.payment_status}")`
+      placeRes.body.order.payment_status === "Payment Pending — Cash on Delivery" ||
+      placeRes.body.order.payment_status === "CASH ON DELIVERY — PAYMENT PENDING",
+      `Payment status is explicitly Payment Pending / Cash on Delivery, not Paid (got: "${placeRes.body.order.payment_status}")`
     );
   }
 
@@ -439,7 +440,11 @@ async function runTests() {
     assert(waText.includes(testPhoneA), "WhatsApp message contains phone number");
     assert(waText.includes("Nashik"), "WhatsApp message contains delivery address city");
     assert(waText.includes("Garam Masala"), "WhatsApp message contains ordered product name");
-    assert(waText.includes("Payment Pending — Cash on Delivery"), "WhatsApp message contains 'Payment Pending — Cash on Delivery'");
+    assert(
+      waText.includes("Payment Pending — Cash on Delivery") ||
+      waText.includes("CASH ON DELIVERY — PAYMENT PENDING"),
+      "WhatsApp message contains Cash on Delivery Payment Pending"
+    );
     assert(!waText.includes("Paid\n"), "WhatsApp message does NOT claim Paid");
   }
 

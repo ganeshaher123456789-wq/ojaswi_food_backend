@@ -1,9 +1,15 @@
-const BASE_URL = "http://localhost:5000";
+import http from "http";
+import app from "../server.js";
 
 async function runPhoneValidationTests() {
   console.log("==================================================");
   console.log("📱 TESTING MOBILE NUMBER VALIDATION & OTP VERIFICATION");
   console.log("==================================================");
+
+  const server = http.createServer(app);
+  await new Promise((resolve) => server.listen(0, resolve));
+  const port = server.address().port;
+  const BASE_URL = `http://127.0.0.1:${port}`;
 
   const randPhone = () => "98" + Math.floor(10000000 + Math.random() * 90000000);
   const p1 = randPhone();
@@ -25,48 +31,52 @@ async function runPhoneValidationTests() {
     { input: "abcdefghij", expected: null, desc: "Non-numeric (invalid)" }
   ];
 
-  for (const t of testNumbers) {
-    const res = await fetch(`${BASE_URL}/api/auth/request-phone-otp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: t.input })
-    });
-    const data = await res.json();
+  try {
+    for (const t of testNumbers) {
+      const res = await fetch(`${BASE_URL}/api/auth/request-phone-otp`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: t.input })
+      });
+      const data = await res.json();
 
-    if (t.expected) {
-      if (res.status === 200 && data.success && data.devOtp) {
-        console.log(`✅ PASS: [${t.desc}] "${t.input}" -> accepted as 10-digit, devOtp received: ${data.devOtp}`);
-        
-        // Test verify OTP
-        const vRes = await fetch(`${BASE_URL}/api/auth/verify-phone-otp`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ phone: t.input, otp: data.devOtp })
-        });
-        const vData = await vRes.json();
-        if (vRes.status === 200 && vData.success && vData.token) {
-          console.log(`   └─ ✅ OTP Verified! User authenticated (Phone: ${vData.user.phone})`);
+      if (t.expected) {
+        if (res.status === 200 && data.success && data.devOtp) {
+          console.log(`✅ PASS: [${t.desc}] "${t.input}" -> accepted as 10-digit, devOtp received: ${data.devOtp}`);
+          
+          // Test verify OTP
+          const vRes = await fetch(`${BASE_URL}/api/auth/verify-phone-otp`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phone: t.input, otp: data.devOtp })
+          });
+          const vData = await vRes.json();
+          if (vRes.status === 200 && vData.success && vData.token) {
+            console.log(`   └─ ✅ OTP Verified! User authenticated (Phone: ${vData.user.phone})`);
+          } else {
+            console.error(`   └─ ❌ Failed to verify OTP for ${t.input}:`, vData);
+            process.exit(1);
+          }
         } else {
-          console.error(`   └─ ❌ Failed to verify OTP for ${t.input}:`, vData);
+          console.error(`❌ FAIL: Expected success for ${t.input} (${t.desc}), got:`, data);
           process.exit(1);
         }
       } else {
-        console.error(`❌ FAIL: Expected success for ${t.input} (${t.desc}), got:`, data);
-        process.exit(1);
-      }
-    } else {
-      if (res.status === 400 && !data.success) {
-        console.log(`✅ PASS: [${t.desc}] "${t.input}" -> correctly rejected (400 Bad Request: ${data.error})`);
-      } else {
-        console.error(`❌ FAIL: Expected rejection for ${t.input} (${t.desc}), got:`, data);
-        process.exit(1);
+        if (res.status === 400 && !data.success) {
+          console.log(`✅ PASS: [${t.desc}] "${t.input}" -> correctly rejected (400 Bad Request: ${data.error})`);
+        } else {
+          console.error(`❌ FAIL: Expected rejection for ${t.input} (${t.desc}), got:`, data);
+          process.exit(1);
+        }
       }
     }
-  }
 
-  console.log("==================================================");
-  console.log("🎉 ALL PHONE VALIDATION & OTP TESTS PASSED!");
-  console.log("==================================================");
+    console.log("==================================================");
+    console.log("🎉 ALL PHONE VALIDATION & OTP TESTS PASSED!");
+    console.log("==================================================");
+  } finally {
+    server.close();
+  }
 }
 
 runPhoneValidationTests().catch(err => {

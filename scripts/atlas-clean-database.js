@@ -98,3 +98,4 @@ if (process.argv[1]?.endsWith("atlas-clean-database.js")) {
       process.exit(1);
     });
 }
+
