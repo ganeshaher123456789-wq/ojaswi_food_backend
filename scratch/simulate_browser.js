@@ -10,7 +10,7 @@ async function runBrowserTest() {
   const reqRes = await fetch(`${baseUrl}/api/auth/request-phone-otp`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phone: "7620098478" })
+    body: JSON.stringify({ phone: "7972483489" })
   });
   const reqData = await reqRes.json();
   console.log("1. OTP Sent:", reqData);
@@ -19,7 +19,7 @@ async function runBrowserTest() {
   const verRes = await fetch(`${baseUrl}/api/auth/verify-phone-otp`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phone: "7620098478", otp: reqData.devOtp, name: "Ganesh" })
+    body: JSON.stringify({ phone: "7972483489", otp: reqData.devOtp, name: "Ganesh" })
   });
   const cookie = verRes.headers.get("set-cookie");
   const verData = await verRes.json();

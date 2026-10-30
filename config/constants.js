@@ -18,8 +18,8 @@ export const OJASWI_CONSTANTS = {
 
   // Verified official registrations from index3.html
   FSSAI_LICENSE: "3025120612245599988",
-  PHONE: "917620098478",
-  DISPLAY_PHONE: "+91 7620098478",
+  PHONE: "917972483489",
+  DISPLAY_PHONE: "+91 7972483489",
   EMAIL: "ojaswifoods@gmail.com",
   MAPS_QUERY_URL: "https://www.google.com/maps?q=Ojaswi%20Foods%2C%2052%2F2%2C%20Malegaon%2C%20423203",
   MAPS_EMBED_URL: "https://www.google.com/maps?q=Ojaswi%20Foods%2C%2052%2F2%2C%20Malegaon%2C%20423203&output=embed",

@@ -10,7 +10,7 @@ async function runTests() {
   const fastRes = await fetch(`${baseUrl}/api/auth/fast-login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phone: "7620098478", name: "Ganesh Sharma" })
+    body: JSON.stringify({ phone: "7972483489", name: "Ganesh Sharma" })
   });
   const fastData = await fastRes.json();
   console.log("Fast Login Status:", fastRes.status, fastData.success ? "SUCCESS" : "FAILED", fastData.user?.name);
@@ -37,11 +37,11 @@ async function runTests() {
   if (!otpVerData.success) throw new Error("OTP verify failed");
 
   // Test 3: Master Dev Code Verification
-  console.log("\n[TEST 3] Testing Master Dev Code Verification (762009)...");
+  console.log("\n[TEST 3] Testing Master Dev Code Verification (797248)...");
   const masterVerRes = await fetch(`${baseUrl}/api/auth/verify-phone-otp`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phone: "9876543210", otp: "762009", name: "Master Code Customer" })
+    body: JSON.stringify({ phone: "9876543210", otp: "797248", name: "Master Code Customer" })
   });
   const masterVerData = await masterVerRes.json();
   console.log("Master Code Verify Status:", masterVerRes.status, masterVerData.success ? "SUCCESS" : "FAILED");
@@ -52,7 +52,7 @@ async function runTests() {
   const waRes = await fetch(`${baseUrl}/api/auth/whatsapp-login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ phone: "7620098478", name: "WhatsApp Customer" })
+    body: JSON.stringify({ phone: "7972483489", name: "WhatsApp Customer" })
   });
   const waData = await waRes.json();
   console.log("WhatsApp Login Status:", waRes.status, waData.success ? "SUCCESS" : "FAILED");
@@ -69,12 +69,12 @@ async function runTests() {
   console.log("Admin Login Status:", adminRes.status, adminData.success ? "SUCCESS" : "FAILED", adminData.admin?.role);
   if (!adminData.success) throw new Error("Admin login failed");
 
-  // Test 6: Admin Terminal Login with Owner Phone (7620098478 / OjaswiAdmin@2026)
+  // Test 6: Admin Terminal Login with Owner Phone (7972483489 / OjaswiAdmin@2026)
   console.log("\n[TEST 6] Testing Admin Terminal Login with owner phone number...");
   const adminPhoneRes = await fetch(`${baseUrl}/api/auth/admin-login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username: "7620098478", password: "OjaswiAdmin@2026" })
+    body: JSON.stringify({ username: "7972483489", password: "OjaswiAdmin@2026" })
   });
   const adminPhoneData = await adminPhoneRes.json();
   console.log("Admin Phone Login Status:", adminPhoneRes.status, adminPhoneData.success ? "SUCCESS" : "FAILED");

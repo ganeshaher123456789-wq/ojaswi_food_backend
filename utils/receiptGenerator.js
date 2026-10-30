@@ -155,7 +155,7 @@ export function generateReceiptData(order, userProfile = null) {
       tradeName: "Ojaswi Premium Authentic Indian Spices",
       fssaiLicense: OJASWI_CONSTANTS.FSSAI_LICENSE,
       address: OJASWI_CONSTANTS.PACKED_BY,
-      phone: "+91 7620098478",
+      phone: "+91 7972483489",
       email: "ojaswifoods@gmail.com",
       origin: "Malegaon, Nashik, Maharashtra - 423203"
     },

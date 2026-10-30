@@ -188,7 +188,7 @@ export async function syncMongoAtlas() {
       id: 9999,
       name: "Ojaswi Administrator",
       email: ENV.ADMIN_DEFAULT_EMAIL,
-      phone: "917620098478",
+      phone: "917972483489",
       password_hash: passwordHash,
       role: "admin"
     });

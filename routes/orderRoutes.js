@@ -942,7 +942,7 @@ router.get("/:id", async (req, res, next) => {
           is_dispatched: ["Shipped", "Out for Delivery", "Delivered"].includes(currentStatus),
           is_out_for_delivery: ["Out for Delivery", "Delivered"].includes(currentStatus),
           is_delivered: currentStatus === "Delivered",
-          whatsapp_track_url: `https://wa.me/917620098478?text=${encodeURIComponent('Hello Ojaswi Foods, please provide a live tracking update for my order ' + order.id)}`
+          whatsapp_track_url: `https://wa.me/917972483489?text=${encodeURIComponent('Hello Ojaswi Foods, please provide a live tracking update for my order ' + order.id)}`
         },
         fssai: OJASWI_CONSTANTS.FSSAI_LICENSE,
         location: OJASWI_CONSTANTS.PACKED_BY

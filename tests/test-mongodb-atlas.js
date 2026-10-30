@@ -277,6 +277,7 @@ async function runMongoDBAtlasTests() {
     console.log("==================================================");
 
   } catch (err) {
+    
     console.error("Test failure:", err);
     process.exitCode = 1;
   } finally {

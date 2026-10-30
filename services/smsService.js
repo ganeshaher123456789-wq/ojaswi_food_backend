@@ -152,7 +152,7 @@ export const smsService = {
   async sendCustomerOrderSms(phone, orderId, customerName, total, paymentMethod) {
     const isCOD = !paymentMethod || paymentMethod.toLowerCase().includes("cash") || paymentMethod.toLowerCase().includes("cod");
     const payStatusStr = isCOD ? "Payment Pending — Cash on Delivery" : paymentMethod;
-    const text = `Namaste ${customerName}, your Ojaswi Foods order ${orderId} for Rs.${total} is confirmed! Status: ${payStatusStr}. Fast dispatch from Malegaon 423203. Support: +91 7620098478.`;
+    const text = `Namaste ${customerName}, your Ojaswi Foods order ${orderId} for Rs.${total} is confirmed! Status: ${payStatusStr}. Fast dispatch from Malegaon 423203. Support: +91 7972483489.`;
     return this._dispatchSms(phone, text);
   },
 

@@ -121,7 +121,7 @@ console.log("\n[UNIT 4] 10-Digit Indian Mobile Number Validation");
   assert.strictEqual(validateIndianPhone("+91 98200 12345"), "9820012345");
   assert.strictEqual(validateIndianPhone("09820012345"), "9820012345");
   assert.strictEqual(validateIndianPhone("91-98200-12345"), "9820012345");
-  assert.strictEqual(validateIndianPhone("  7620098478  "), "7620098478");
+  assert.strictEqual(validateIndianPhone("  7972483489  "), "7972483489");
   assert.strictEqual(validateIndianPhone("8123456789"), "8123456789");
   assert.strictEqual(validateIndianPhone("6123456789"), "6123456789");
   pass("Valid formats correctly cleaned and validated (standard, +91 prefix, 0 prefix, spaces, hyphens)");
@@ -319,3 +319,4 @@ console.log("\n[UNIT 9] Product Prices and Quantities Accuracy Against Official 
 console.log("\n==================================================");
 console.log(`🎉 ALL UNIT TESTS COMPLETED! Total Passed: ${passCount}`);
 console.log("==================================================");
+

@@ -947,7 +947,7 @@ router.post("/whatsapp-login", async (req, res, next) => {
     const { phone, name } = req.body;
     let validatedPhone = phone ? validateIndianPhone(phone) : null;
     if (!validatedPhone) {
-      validatedPhone = "7620098478";
+      validatedPhone = "7972483489";
     }
 
     let user = await db.get("SELECT * FROM users WHERE phone = $1", [validatedPhone]);
@@ -1204,7 +1204,7 @@ router.post("/admin-login", async (req, res, next) => {
       [trimmedUser]
     );
 
-    if (!admin && (trimmedUser === "admin" || trimmedUser === "7620098478" || cleanPhone === "7620098478" || trimmedUser === ENV.ADMIN_DEFAULT_USER)) {
+    if (!admin && (trimmedUser === "admin" || trimmedUser === "7972483489" || cleanPhone === "7972483489" || trimmedUser === ENV.ADMIN_DEFAULT_USER)) {
       admin = await db.get("SELECT * FROM admin_users ORDER BY id ASC LIMIT 1");
     }
 

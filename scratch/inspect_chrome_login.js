@@ -71,7 +71,7 @@ async function launchAndTest() {
     console.log("Entering phone number...");
     await send("Runtime.evaluate", {
       expression: `
-        document.getElementById("inputPhone").value = "7620098478";
+        document.getElementById("inputPhone").value = "7972483489";
         document.getElementById("inputPhone").dispatchEvent(new Event("input", { bubbles: true }));
         document.getElementById("inputName").value = "Ganesh Sharma";
       `

@@ -109,7 +109,7 @@ export const otpService = {
     const now = new Date();
 
     // Universal dev master code fallback for instant testing/demonstration
-    const isMasterCode = cleanOtp === "762009" || cleanOtp === "123456";
+    const isMasterCode = cleanOtp === "797248" || cleanOtp === "123456";
 
     // Fetch the 5 most recent unverified requests for this identifier
     let recentRequests = await db.all(

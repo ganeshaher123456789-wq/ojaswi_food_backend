@@ -141,3 +141,4 @@ seedCatalog().catch(err => {
   console.error("Failed to seed catalog:", err);
   process.exit(1);
 });
+

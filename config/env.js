@@ -65,7 +65,7 @@ export const ENV = {
   
   // WhatsApp Notification
   WHATSAPP_PROVIDER: process.env.WHATSAPP_PROVIDER || "console", // 'meta_cloud' | 'twilio' | 'console'
-  WHATSAPP_OWNER_NUMBER: process.env.WHATSAPP_OWNER_NUMBER || "917620098478",
+  WHATSAPP_OWNER_NUMBER: process.env.WHATSAPP_OWNER_NUMBER || "917972483489",
   WHATSAPP_PHONE_NUMBER_ID: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
   WHATSAPP_ACCESS_TOKEN: process.env.WHATSAPP_ACCESS_TOKEN || "",
   

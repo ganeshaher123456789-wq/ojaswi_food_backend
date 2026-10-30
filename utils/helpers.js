@@ -2,7 +2,7 @@ import crypto from "crypto";
 
 /**
  * Validates and normalizes an Indian phone number.
- * Accepts formats: 7620098478, +917620098478, 07620098478, +91-7620098478
+ * Accepts formats: 7972483489, +917972483489, 07972483489, +91-7972483489
  * Returns 10-digit string or null if invalid.
  */
 export function validateIndianPhone(input) {

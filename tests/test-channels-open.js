@@ -63,12 +63,12 @@ assert(smsText.includes("Payment Pending - Cash on Delivery"), "SMS must include
 assert(smsText.length < 350, "SMS text must be concise for mobile carrier compatibility");
 
 // Test iOS vs Android SMS URI formats
-const OJASWI_PHONE = "917620098478";
+const OJASWI_PHONE = "917972483489";
 const androidSmsUrl = `sms:+${OJASWI_PHONE}?body=${encodeURIComponent(smsText)}`;
 const iosSmsUrl = `sms:+${OJASWI_PHONE}&body=${encodeURIComponent(smsText)}`;
 
-assert(androidSmsUrl.startsWith("sms:+917620098478?body="), "Android SMS URI starts with sms:+917620098478?body=");
-assert(iosSmsUrl.startsWith("sms:+917620098478&body="), "iOS SMS URI starts with sms:+917620098478&body=");
+assert(androidSmsUrl.startsWith("sms:+917972483489?body="), "Android SMS URI starts with sms:+917972483489?body=");
+assert(iosSmsUrl.startsWith("sms:+917972483489&body="), "iOS SMS URI starts with sms:+917972483489&body=");
 
 console.log("✅ PASS: SMS message format & mobile URI generation verified");
 console.log("   -> Android URL:", androidSmsUrl.slice(0, 75) + "...");
@@ -124,7 +124,7 @@ function buildCheckoutOrderMessage(data, orderId = "") {
 }
 const waMsg = buildCheckoutOrderMessage(sampleData, testOrderId);
 const waUrl = "https://api.whatsapp.com/send?phone=" + OJASWI_PHONE + "&text=" + encodeURIComponent(waMsg);
-assert(waUrl.includes("api.whatsapp.com/send?phone=917620098478"), "WhatsApp URL must target +917620098478");
+assert(waUrl.includes("api.whatsapp.com/send?phone=917972483489"), "WhatsApp URL must target +917972483489");
 
 console.log("✅ PASS: WhatsApp URL generation verified");
 console.log("   -> WhatsApp URL:", waUrl.slice(0, 75) + "...");

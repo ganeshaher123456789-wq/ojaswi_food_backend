@@ -132,7 +132,7 @@ const legalPages = [
 for (const p of legalPages) {
   const pageContent = fs.readFileSync(path.join(frontendDir, p), "utf-8");
   assert(pageContent.includes("Malegaon"), `${p} mentions Malegaon headquarters`);
-  assert(pageContent.includes("7620098478") || pageContent.includes("ojaswifoods@gmail.com"), `${p} includes official contact info`);
+  assert(pageContent.includes("7972483489") || pageContent.includes("ojaswifoods@gmail.com"), `${p} includes official contact info`);
 }
 pass(`All ${legalPages.length} legal compliance pages verified with official contact and location details`);
 
